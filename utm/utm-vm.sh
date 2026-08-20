@@ -730,7 +730,23 @@ printf '  time now      : %s\n' "$(busybox date '+%H:%M:%S')"
 #
 # Add further cases here as they are found. The shape is the same: something
 # countable on disk over something knowable from a config file.
-_fmt_total=$(busybox grep -cE '^[a-zA-Z]' /usr/share/texmf-dist/web2c/fmtutil.cnf 2>/dev/null || echo 0)
+# Only the formats whose ENGINE is actually installed get built. fmtutil.cnf
+# lists every format TeX Live knows about -- 53 of them -- but a basic install
+# ships a handful of engines, so counting the file's lines gives a denominator
+# that can never be reached: this reported 11/53 and sat there looking stalled
+# after fmtutil had in fact finished. Column 2 of each line is the engine, so
+# count only the lines whose engine exists on this machine.
+_fmt_cnf=/usr/share/texmf-dist/web2c/fmtutil.cnf
+_fmt_total=0
+if [ -r "$_fmt_cnf" ]; then
+    _fmt_total=$(busybox awk '/^[a-zA-Z]/ && NF >= 2 {print $2}' "$_fmt_cnf" \
+        | busybox sort -u \
+        | while read -r _e; do
+              command -v "$_e" >/dev/null 2>&1 && busybox grep -cE "^[a-zA-Z][^ ]*[ 	]+$_e[ 	]" "$_fmt_cnf"
+          done \
+        | busybox awk '{t += $1} END {print t + 0}')
+fi
+[ "${_fmt_total:-0}" -gt 0 ] 2>/dev/null || _fmt_total=0
 if [ "$_fmt_total" -gt 0 ]; then
     _fmt_built=$(busybox find /usr/share/texmf-var -name '*.fmt' 2>/dev/null | busybox wc -l)
     printf '\n  artifacts:\n'

@@ -3197,6 +3197,74 @@ DOASCONF
 #
 # Whether the account can log in and whether it can become root are two
 # different questions. Failing the first is no reason to skip the second.
+# Login shells.
+#
+# Alpine gives every account /bin/sh, which is busybox ash: small, fast, POSIX,
+# and missing the things people reach for without thinking -- tab completion
+# worth the name, a usable history, [[ ]], arrays. On a Zero that trade is
+# defensible. On anything with room it is just a worse prompt.
+#
+# WHY /etc/passwd IS REWRITTEN BY HAND. There is no chsh here: busybox does not
+# provide one and Alpine keeps it in the 'shadow' package, which is a whole
+# user-management suite to pull in for one field. The rewrite uses the same
+# idiom as the password sync -- awk through ENVIRON rather than -v, because -v
+# processes backslash escapes before awk sees the value, and a temporary file
+# renamed into place, because a truncated /etc/passwd is a machine that cannot
+# log anyone in at all.
+#
+# The mode is set EXPLICITLY to 0644 rather than left to the umask. /etc/passwd
+# is read by every name lookup any account makes; one written 0600 gives a
+# system where `id` answers "unknown ID 1000" and nothing else works either.
+# That is not hypothetical -- a leaked umask did exactly that to /etc here.
+set_login_shell() {  # <account> <shell>
+    _u="$1"; _sh="$2"
+    id "$_u" >/dev/null 2>&1 || return 1
+    [ -x "$_sh" ] || { warn "$_sh is not executable -- leaving $_u's shell alone"; return 1; }
+    # login(1) and some daemons check /etc/shells before honouring a shell.
+    grep -qxF "$_sh" /etc/shells 2>/dev/null || echo "$_sh" >> /etc/shells
+    _cur=$(getent passwd "$_u" 2>/dev/null | cut -d: -f7)
+    [ "$_cur" = "$_sh" ] && { note "$_u already uses $_sh"; return 0; }
+
+    if COPAL_U="$_u" COPAL_S="$_sh" awk -F: -v OFS=: \
+           '$1 == ENVIRON["COPAL_U"] { $7 = ENVIRON["COPAL_S"] } { print }' \
+           /etc/passwd > /etc/passwd.copal && [ -s /etc/passwd.copal ]
+    then
+        chown root:root /etc/passwd.copal 2>/dev/null || true
+        chmod 0644 /etc/passwd.copal 2>/dev/null || true
+        mv /etc/passwd.copal /etc/passwd \
+            || { warn "could not replace /etc/passwd"; rm -f /etc/passwd.copal; return 1; }
+        note "$_u -> $_sh"
+    else
+        rm -f /etc/passwd.copal
+        warn "could not rewrite /etc/passwd -- $_u keeps $_cur"
+        return 1
+    fi
+}
+
+# bash for the admin user, and for root too.
+#
+# Root is the arguable one. The conservative position is that root's shell
+# should be the one that cannot go missing -- /bin/sh is busybox, which is also
+# /bin/ls and /bin/cat, so if it is gone the system has bigger problems. A bash
+# that failed to install, or was removed by a careless `apk del`, would leave
+# root with no working login.
+#
+# Alpine's bash lives at /bin/bash, on the root filesystem rather than under
+# /usr, so it survives a /usr that did not mount -- which removes most of that
+# objection. The check above is the rest of it: the shell is only set if it is
+# actually there and executable, so the failure mode is "root keeps ash", not
+# "root cannot log in".
+admin_set_shells() {
+    say "Login shells"
+    if ! command -v bash >/dev/null 2>&1; then
+        try_add bash || { warn "bash is not available -- leaving both accounts on /bin/sh"; return 0; }
+    fi
+    _bash=$(command -v bash 2>/dev/null || echo /bin/bash)
+    set_login_shell "$PI_USER" "$_bash" || true
+    set_login_shell root "$_bash" || true
+    note "ash is still there as /bin/sh -- scripts with #!/bin/sh are unaffected"
+}
+
 admin_ensure_privileges() {
     id "$PI_USER" >/dev/null 2>&1 || { warn "user '$PI_USER' does not exist -- cannot grant it anything"; return 1; }
 
@@ -3215,6 +3283,7 @@ admin_ensure_privileges() {
     admin_ensure_doas || warn "doas is not usable yet -- stage 13 will refuse to lock root"
     admin_grant_sudo
     admin_fix_desktop_groups
+    admin_set_shells
     return 0
 }
 
@@ -4064,6 +4133,88 @@ MSG
 # All of them want more RAM than this board has spare, so the warning about
 # zram is not boilerplate -- run stage 5 first and it is the difference
 # between slow and unusable.
+# Brave, and why it is not one line.
+#
+# The instruction everyone has is
+#
+#     curl -fsS https://dl.brave.com/install.sh | sh
+#
+# and on Alpine it does not work. That script reads the machine's package
+# manager and stops if it does not recognise one; its own words are
+#
+#     Could not find a supported package manager. Only apt/dnf/eopkg/
+#     pacman(+paru/pikaur/yay)/rpm-ostree/yum/zypper are supported.
+#
+# apk is not on that list, and it is not an oversight that could be worked
+# around: what the script would install is a .deb or .rpm of a browser linked
+# against glibc, and Alpine is musl. There is no Brave package in Alpine
+# either -- main, community and testing all carry zero, on x86_64 and aarch64
+# alike (checked against the APKINDEX, not the search page, which answers
+# misleadingly for a name that does not exist).
+#
+# Flatpak is the route that does work, and it works precisely because it does
+# not pretend musl is glibc: the runtime it pulls down IS a glibc userland,
+# sandboxed, sitting beside the host system rather than linked into it. That
+# honesty costs about 600 MB for the org.freedesktop.Platform runtime plus the
+# browser, which is why this is offered rather than assumed, and why it is a
+# poor idea on a 512 MB Zero with an 8 GB card.
+#
+# Flathub publishes com.brave.Browser for x86_64 and aarch64 only. On armhf
+# there is nothing to install and saying so is more use than trying.
+install_brave() {
+    say "Brave"
+    _arch=$(apk --print-arch 2>/dev/null || echo unknown)
+    case "$_arch" in
+        x86_64|aarch64) : ;;
+        *)  warn "Flathub publishes Brave for x86_64 and aarch64 only, and this is $_arch."
+            note "There is no Brave build for this architecture from any source."
+            note "BadWolf is the browser that fits here -- re-run stage 4 and pick 'b'."
+            return 0 ;;
+    esac
+
+    cat <<'MSG'
+
+    The published one-liner --  curl -fsS https://dl.brave.com/install.sh | sh
+    -- does not work here. That script supports apt, dnf, pacman, zypper and
+    friends; apk is not among them, and what it would fetch is a glibc binary
+    for a musl system either way. Alpine packages no Brave at all.
+
+    Flatpak is the way that works. It brings its own glibc runtime, sandboxed,
+    instead of pretending this system has one:
+
+        org.freedesktop.Platform runtime    ~500 MB
+        com.brave.Browser                   ~150 MB
+
+    That is a lot of card. Chromium from apk is the same engine without the
+    runtime, if the ad blocking is not the point.
+
+MSG
+    have_space_mb 1200 "Brave and its Flatpak runtime" || return 0
+    confirm "Install Brave as a Flatpak?" || { note "Skipped."; return 0; }
+
+    try_add flatpak || { warn "could not install flatpak"; return 1; }
+    # --if-not-exists so a re-run is not an error. flathub is not configured by
+    # the package; without this the install below has no remote to resolve from.
+    flatpak remote-add --if-not-exists flathub \
+        https://dl.flathub.org/repo/flathub.flatpakrepo >/dev/null 2>&1 \
+        || warn "could not add the flathub remote"
+
+    say "Installing com.brave.Browser (this is the slow part)"
+    if flatpak install -y --noninteractive flathub com.brave.Browser; then
+        note "run it with:  flatpak run com.brave.Browser"
+        # A launcher, so it appears beside everything else rather than only
+        # being reachable by typing a reverse-DNS name from memory.
+        mkdir -p /usr/local/bin
+        printf '#!/bin/sh\nexec flatpak run com.brave.Browser "$@"\n' > /usr/local/bin/brave
+        chmod 0755 /usr/local/bin/brave
+        note "or just:  brave"
+    else
+        warn "the Flatpak install did not complete -- usually network or space"
+        note "Try again with: flatpak install flathub com.brave.Browser"
+        return 1
+    fi
+}
+
 install_modern_browser() {
     say "A modern browser"
     _arch=$(apk --print-arch 2>/dev/null || echo unknown)
@@ -4082,6 +4233,9 @@ install_modern_browser() {
       b   BadWolf       WebKitGTK behind a one-line interface. A current
                         engine and current TLS in a fraction of the RAM --
                         the pick if this is a Zero 2 W (~90 MB)
+      v   Brave         Chromium with the ad and tracker blocking built in.
+                        Not an apk -- it arrives as a Flatpak, which brings a
+                        glibc runtime with it (~600 MB all told). See below.
       n   None          keep Dillo/NetSurf/Links and move on
 
 MSG
@@ -4095,6 +4249,7 @@ MSG
                 f|F) _br="firefox-esr"; _bin=firefox-esr ;;
                 c|C) _br="chromium";    _bin=chromium ;;
                 b|B) _br="badwolf";     _bin=badwolf ;;
+                v|V) install_brave; return 0 ;;
                 *)   note "Skipped."; return 0 ;;
             esac ;;
         armhf)
