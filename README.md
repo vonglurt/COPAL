@@ -26,9 +26,66 @@ without giving up any of the smallness that made it worth booting.
 
 Copal is an *aggregation* of Alpine — it downloads stock Alpine and calls
 Alpine's own tools — **not** a derivative work of it, and not a fork. It is not
-affiliated with or endorsed by the Alpine project. *(The resemblance to the name
-of Alpine's founder, Natanael **Copa**, is a genuine accident — noticed after the
-fact and kept because it was too good to throw away.)*
+affiliated with or endorsed by the Alpine project.
+
+---
+
+## What you actually do
+
+Four things. Only the first two happen on this Mac, and only one of them is
+typing.
+
+```mermaid
+flowchart TD
+    subgraph M["on this Mac · about 10 minutes"]
+        A["<b>1 · Choose</b><br/>system type — a Pi, a PC, or a VM on this Mac<br/>destination media — SD card, USB stick, or a .img file"]
+        B["<b>2 · Say who you are</b><br/>a username you pick, and the SSH public key<br/>already sitting in this Mac's ~/.ssh"]
+        A --> B
+    end
+    subgraph T["on the machine you are building · 20 minutes to several hours"]
+        C["<b>3 · Log in as root</b> — no password yet<br/>run copal-init.sh · stages 1, 2, 3"]
+        D(("stage 3<br/>reboots"))
+        E["<b>3 · Log in as root, again</b><br/>stages 4 to 13 — installing is root's job"]
+        F["<b>4 · Log in as your own account</b><br/>type <code>startx</code>"]
+        G(["a tiling desktop, running as you —<br/>not as root"])
+        C --> D --> E --> F --> G
+    end
+    B ==>|"write the card,<br/>or boot the image"| C
+```
+
+**1 — the only choice that cannot be changed later.** The system type decides
+the CPU and the bootloader; getting it wrong is not a degraded machine but one
+that stops dead at boot, so `./copal` asks it explicitly and shows you the
+consequences first. The media question has an escape hatch: answer `image`
+instead of a disk identifier and nothing physical is touched at all.
+
+**2 — the username is the login you will actually use.** It becomes the home
+directory, the owner of the desktop configuration, the `doas` rule, and the
+account the SSH key is authorised for. The key itself is not typed in — the
+first of `~/.ssh/id_ed25519.pub`, `id_ecdsa.pub` or `id_rsa.pub` found on this
+Mac travels on the card, and only ever the `.pub` half. No key on the Mac means
+a password-only account, which is a warning rather than a failure.
+
+**3 — root, twice, and that is not a mistake.** Stage 3 moves the root
+filesystem onto the disk and reboots, so you log in as root before it and again
+after it. Root installs the system; your own account runs the desktop. Those are
+two jobs, and Copal keeps them apart — log in as yourself too early and
+`copal-init.sh` will tell you it needs root.
+
+**4 — `startx` from your own account, which is the part that usually does not
+work elsewhere.** Three things have to be true before an ordinary user can start
+X on a framebuffer with no seat manager: membership of the `video`, `input` and
+`tty` groups; `allowed_users=console` in `/etc/X11/Xwrapper.config`; and
+`needs_root_rights=yes` beside it, because Alpine ships no such file and the
+default may drop root and then fail to open `/dev/fb0`. Miss any one and you get
+an identical black screen. Stage 4 sets all three. If you type `startx` while
+still root, `copal-startx` stops you and says why — a warning, not a lock, since
+recovering a broken desktop from a root login is sometimes exactly the thing to
+do.
+
+The rest of this file expands those four steps: **[From zero to a running
+system](#from-zero-to-a-running-system)** is the step-by-step version, with the
+menus as they actually appear.
 
 ---
 
@@ -54,6 +111,781 @@ targets, pointed at a different medium:
 What that buys is a regression test. Change the installer, boot both VMs
 headless, and see whether they still reach a login prompt — in about a minute,
 with a serial log to read when they do not.
+
+## From zero to a running system
+
+There are four menus, and they run on two different machines. Knowing which one
+you are in tells you what your options are and which machine you are talking to:
+
+| Menu | Runs on | What it decides | Destructive? |
+|---|---|---|---|
+| `./copal` | this Mac | which target, and whether to start at all | never — writes nothing |
+| `copal-prep.sh` | this Mac | who the admin user is, and what medium gets written | one step, twice confirmed |
+| `copal-init.sh` | the target | which of the fifteen stages run, and in what order | stage 3 reboots; the rest are re-runnable |
+| `copal-menu`, `copal-center`, `copal-config` | the target's desktop | what is installed, and what to launch | no |
+
+```mermaid
+flowchart TD
+    A["<b>./copal</b><br/>front door — writes nothing"] --> B["<b>copal-prep.sh</b><br/>five questions, then the download"]
+    B --> C{"which medium?"}
+    C -->|"answer a disk<br/>identifier"| D["SD card or USB stick"]
+    C -->|"answer <b>image</b>,<br/>or pass --image"| E["a .img file"]
+    D --> F["put it in the Pi or the PC<br/>and power on"]
+    E --> G["<b>copal-vm.sh</b> — QEMU, headless or serial<br/><b>utm/utm-vm.sh</b> — a registered UTM machine"]
+    F --> H["<b>copal-init.sh</b><br/>fifteen stages, on the target"]
+    G --> H
+    H --> I["stages 1, 2, 3 — a real root filesystem"]
+    I --> J["stage 4 — X.Org and i3"]
+    I --> K["no stage 4 — headless"]
+    J --> L["<b>copal-menu / copal-center / copal-config</b><br/>the desktop's own menus"]
+```
+
+Everything left of `copal-init.sh` happens on the Mac and takes about ten
+minutes. Everything right of it happens on the machine being built and takes
+between twenty minutes and several hours, depending entirely on how many of
+the fifteen stages you ask for. The split falls there because macOS cannot
+create an ext4 filesystem.
+
+### Step 0 — ask the Mac what it can do
+
+Nothing here needs Homebrew. `curl`, `shasum`, `bsdtar`, `diskutil` and
+`hdiutil` all ship with macOS; UTM is needed only for the `.utm` targets and
+QEMU only if you want `copal-vm.sh` to boot an image directly.
+
+```console
+$ ./copal --check
+WHAT THIS MAC CAN BUILD
+────────────────────────────────────────────────────────────────────
+
+  macOS                    26.5.2
+  Architecture             arm64
+  Model                    iMac21,1
+  CPU                      8 cores
+  RAM                      16 GB
+  Free disk                423Gi
+
+  [ok]   curl               required, present
+  [ok]   shasum             required, present
+  [ok]   bsdtar             required, present
+  [ok]   diskutil           required, present
+  [ok]   hdiutil            required, present
+  [ok]   UTM                4.7.4
+  [ok]   qemu               present -- copal-vm.sh can boot images directly
+
+  Apple Silicon. The aarch64 VM target runs natively through
+  HVF. The x86_64 VM target will be emulated, and slow.
+
+  All card and PC targets can be built from any Mac -- the payload is
+  copied, never executed, so the host architecture does not matter.
+
+────────────────────────────────────────────────────────────────────
+```
+
+`make configure` asks the same question and answers it with a verdict rather
+than a list — it hands the machine profile to `./copal --check`, adds the tools
+only `make` needs (`script` for `make auto`, QEMU and its EDK2 firmware for
+`make vm`, `utmctl` for the UTM path), and **exits non-zero if a required tool
+is missing**. Every target that builds something depends on that check, so a
+missing `curl` stops the build on line one instead of four hundred megabytes in.
+
+Read the last paragraph rather than the checklist. On an M1 — or any Apple
+Silicon Mac — an **aarch64** guest is virtualised through HVF and runs at
+native speed, while an **x86_64** guest is translated instruction by
+instruction by QEMU's TCG and is perhaps 5–20× slower. Both work. Only one is
+pleasant, and that asymmetry is the single most useful thing to know before
+choosing a target.
+
+Card and PC targets do not care what this Mac is. The payload is copied, never
+executed, so an M1 writes an x86_64 USB stick perfectly well.
+
+### Step 1 — decide what you actually want
+
+Two questions, and they are independent of each other. The first picks a
+**target** (which decides the CPU and the bootloader, on the Mac). The second
+picks a **set of stages** (which decides what the machine becomes, on the
+target). Nothing about the first constrains the second.
+
+```mermaid
+flowchart TD
+    Q{"What machine<br/>will run it?"}
+    Q -->|"none — I just want to see it"| V["<b>8</b> · utm-aarch64<br/><i>start here</i>"]
+    Q -->|"a Raspberry Pi I own"| P{"which board?"}
+    Q -->|"an old PC or laptop"| PC["<b>6</b> · pc — x86_64 UEFI"]
+    Q -->|"a 32-bit UEFI netbook"| PC32["<b>7</b> · pc32"]
+    Q -->|"a PC I do not own yet"| VX["<b>9</b> · utm-x86_64<br/><i>emulated, slow, real code path</i>"]
+    P -->|"Zero, Zero W, Pi 1, CM1"| Z["<b>1</b> · zero — armhf"]
+    P -->|"Pi 2 B v1.1 only"| P2["<b>2</b> · pi2b — armv7"]
+    P -->|"Zero 2 W, Pi 3, CM3"| Z2["<b>3</b> · zero2 — aarch64"]
+    P -->|"Pi 4, 400, CM4"| P4["<b>4</b> · pi4 — aarch64"]
+    P -->|"Pi 5"| P5["<b>5</b> · pi5 — aarch64"]
+
+    R{"What should it<br/>become?"}
+    R -->|"a desktop"| RD["stages 1 2 3 · reboot · 4 5<br/>then 7, 12, 14 as you like"]
+    R -->|"a headless box<br/>with a real root"| RH["stages 1 2 3 · reboot · 5 6 7 13"]
+    R -->|"the smallest thing<br/>that persists"| RM["stages 1 2 5 6 — <b>no stage 3</b><br/>root stays in RAM"]
+    R -->|"all of it, unattended"| RA["answer <b>a</b>, walk away"]
+```
+
+**If you are new to this, choose 8.** It is the same aarch64 payload, the same
+GRUB and the same `copal-init.sh` that a Pi Zero 2 W boots, so nothing you
+learn there is wasted — and it costs no card, no reader, no macOS password and
+nothing erased.
+
+### Step 2 — the front door
+
+`./copal` opens with the whole process on one screen. The left column is always
+this Mac, the right column is always the machine being built:
+
+```console
+$ ./copal --flow
+THE PROCESS, BEGINNING TO END
+────────────────────────────────────────────────────────────────────
+
+  ON THIS MAC                          ON THE MACHINE YOU ARE BUILDING
+  (nothing is erased until step 3)      (Alpine, running from RAM at first)
+
+  1 Choose a target ............ you are here
+     board, PC or VM -- this decides the CPU and the bootloader
+     |
+  2 Download Alpine
+     ~70-390 MB, SHA256 verified. A bad download is refused,
+     never written.
+     |
+  3 Prepare the medium <- first destructive step
+     MBR: FAT32 boot partition + a slot for the Linux root.
+     A card is erased here. A disk image or VM costs nothing.
+     |
+  4 Copy the payload
+     Copied as FILES, never written as a block image.
+     |
+  5 Write the installer
+     copal-init.sh + your answers land on the boot partition.
+     |
+     +------------- boot the target -------------+
+                                          |
+                                       6 Stage 1  base config, password
+                                          |
+                                       7 Stage 2  ext4 filesystem
+                                          |
+                                       8 Stage 3  move / onto disk (reboots)
+                                             until here the root is a tmpfs
+                                             that evaporates at power-off
+                                          |
+                                       9 Stage 4  X.Org + i3 -- the desktop
+                                          |
+                                      10 Stages 5-15 all optional,
+                                             all re-runnable: zram, SSH,
+                                             toolchain, 316 apps, emulators
+
+────────────────────────────────────────────────────────────────────
+  Steps 1-5 are this script. Steps 6-10 run on the target itself,
+  from a menu -- one at a time, or 'copal --auto' for all of them.
+  macOS cannot create ext4, which is why the split falls here.
+```
+
+Press Enter and the target menu follows. The right-hand column is the use case,
+not a feature list — it is there so the choice can be made on what you want the
+machine *for* rather than on a part number:
+
+```console
+CHOOSE A TARGET
+────────────────────────────────────────────────────────────────────
+  The architecture is not a preference. Getting it wrong is not a
+  degraded system -- it is a machine that stops dead at boot.
+
+  Raspberry Pi -- SD card, booted by the GPU firmware
+    1) Pi Zero / Zero W / Pi 1 / CM1  armhf    The original target. 512 MB, single core, no browser but BadWolf
+    2) Pi 2 B v1.1                    armv7    The only 32-bit quad-core Pi. Rare; check /proc/cpuinfo first
+    3) Pi Zero 2 W / Pi 3 / CM3       aarch64  64-bit in the same footprint. Firefox and Chromium both build
+    4) Pi 4 / 400 / CM4               aarch64  Enough RAM to be a real desktop. The comfortable Pi
+    5) Pi 5                           aarch64  Fastest Pi. NVMe over PCIe if you have the hat
+
+  PC -- UEFI only. Legacy BIOS is not supported; see 'w' below
+    6) PC / laptop / Intel Mac        x86_64   Any UEFI machine since roughly 2012. Revives old hardware
+    7) PC, 32-bit UEFI                x86      Early-2010s Atom netbooks and some Bay Trail tablets
+
+  Virtual machine -- UTM on this Mac, no hardware at all
+    8) UTM on Apple Silicon           aarch64  A VM on THIS Mac at native speed. No card, no reboot cycle
+    9) UTM x86_64 on Apple Silicon    x86_64   Emulated. Verifies the PC path without a spare PC
+
+  f) Show the flow chart again
+  r) What can this Mac build?  (requirements check -- writes nothing)
+  w) Why UEFI only, and other things worth knowing first
+  q) Quit
+
+Choose [1-9, f, r, w, q]: 8
+```
+
+Choosing a number does not start anything. It prints a briefing first —
+equipment, CPU, minimum requirements, expected use, and how long it takes:
+
+```console
+
+UTM ON APPLE SILICON   aarch64
+────────────────────────────────────────────────────────────────────
+
+  Equipment you need
+    - This Mac. That is the entire list.
+    - UTM (https://mac.getutm.app), or QEMU from Homebrew
+
+  CPU
+    Apple Silicon, virtualised through HVF -- so the guest runs
+    aarch64 code natively, at full speed. Not emulation.
+
+  Minimum requirements
+    - A 64 GB image (the default). Sparse, so a fresh one costs
+      ~550 MB on disk; a full install grows it to 15-25 GB.
+      4 GB goes to the boot partition, ~60 GiB is the root.
+    - 6 GB RAM allotted to the VM
+    - No card, no reader, no password, nothing erased
+
+  Expected use case
+    This is the one to start with. It runs the identical code
+    path a Pi Zero 2 W boots -- same aarch64 payload, same GRUB, same
+    copal-init.sh -- so it is both a way to try the whole thing
+    without hardware, and the regression test for every change to
+    the installer. A boot that would cost a card write and a walk to
+    the Pi costs about a minute here, with a serial log to read.
+
+  Time  ~5 min to build, then boots in seconds
+
+────────────────────────────────────────────────────────────────────
+
+  Ready to begin.
+
+  This hands over to:   MODEL=vm ./copal-prep.sh
+  Suggested, for a VM:  MODEL=vm ./copal-prep.sh --image copal-vm.img
+
+  That script asks its own questions, and stops before every
+  destructive step. You can still back out.
+```
+
+Only then does it offer to begin, and the offer names the exact command it is
+about to run, so answering `n` and typing that command yourself is a supported
+way to use this menu:
+
+```
+  Ready to begin.
+
+  This hands over to:   MODEL=vm ./copal-prep.sh
+  Suggested, for a VM:  MODEL=vm ./copal-prep.sh --image copal-vm.img
+
+  Begin? [y/N]
+```
+
+The other keys are worth knowing:
+
+| Key | What it does |
+|---|---|
+| `1`–`9` | briefing for that target, then the offer to begin |
+| `f` | the flow chart again |
+| `r` | the requirements check — what *this* Mac can build |
+| `w` | why UEFI only, why the root starts as RAM, and the rest of the caveats |
+| `q` | quit. Nothing was written |
+
+And the three non-interactive forms, for when you already know: `./copal --flow`,
+`./copal --check`, `./copal --targets`.
+
+### Step 3 — the questions `copal-prep.sh` asks
+
+Six, in this order, and only the last two can destroy anything. Each one says
+what the answer binds to, because most of them are hard to change afterwards:
+
+| # | Question | What the answer becomes | How to skip it |
+|---|---|---|---|
+| 1 | *What is this card for?* | the architecture and the bootloader | `MODEL=vm`, `MODEL=zero2`, … |
+| 2 | *Username* `[user]` | `USEROPTS`, `copal.conf`, the `doas` rule, `/home/<name>`, the account the SSH key is authorised for | `CFG_USER=alice` |
+| 3 | *Git identity … offer that as the default?* `[Y/n]` | what stage 1 proposes on the target. Declining leaves it empty and the target asks | answer `n`, or have no git config |
+| 4 | *Disk identifier … or `image` for a file* | the medium | `--image copal-vm.img` |
+| 5 | *Type the disk identifier to confirm* | proves you read **which** disk | — image mode never asks |
+| 6 | *Type ERASE to proceed* | proves intent | — image mode never asks |
+
+Question 2 is asked immediately before the download — the last quiet moment
+before the script either transfers several hundred megabytes or erases
+something. Press Enter and it stays `user`.
+
+Question 4 is the escape hatch. `copal-prep.sh` lists the external physical
+disks first and then asks:
+
+```
+Disk identifier (e.g. disk4, NOT disk4s1), or 'image' for a file:
+```
+
+Answer `image` and nothing physical is touched: it builds a sparse `.img`
+instead, questions 5 and 6 never happen, and you can boot the result under
+QEMU or UTM. **This is the whole emulation path.** It is the same code, the
+same payload and the same `copal-init.sh` — the only thing that changed is
+where the bytes went.
+
+Answer a disk identifier and the script stops, prints the layout it is about to
+write, and demands two separate confirmations — the identifier itself, then the
+word `ERASE`. Typing `ERASE` proves you read a prompt; typing `disk5` proves you
+read *which disk*, and since macOS renumbers disks between sessions that is the
+part worth confirming. It also re-reads the device afterwards, in case something
+was plugged in while you were reading.
+
+Skipping the front door entirely, which is what the Makefile and any scripted
+caller does:
+
+```sh
+MODEL=vm    ./copal-prep.sh --image copal-vm.img   # aarch64 VM image
+MODEL=vmx86 ./copal-prep.sh --image copal-x86.img  # x86_64 VM image
+MODEL=zero2 ./copal-prep.sh                        # a card for a Pi Zero 2 W
+MODEL=pc    ./copal-prep.sh                        # a USB stick for a UEFI laptop
+CFG_USER=alice MODEL=pi4 ./copal-prep.sh           # no questions except the erase
+```
+
+| Flag or variable | What it does |
+|---|---|
+| `--image [PATH]` | write a disk image instead of a disk. Nothing physical is touched |
+| `--fresh` | delete the image first and build it from nothing. **Use this after changing the installer** |
+| `--refresh` | rewrite only the generated files on an existing card — no partitioning, no erase, no re-download |
+| `/path/to/payload` | use an already-extracted Alpine payload and skip the download |
+| `IMAGE_SIZE=12g` | smaller image. The default 64g is a sparse ceiling, not an allocation — see [Sizing](#sizing) |
+| `MODEL=` / `ARCH=` | choose the board, or the architecture directly |
+
+### Step 4 — boot it
+
+**A disk image, under QEMU.** The serial console lands in the terminal you ran
+it from, which is the one that works from the very first frame:
+
+```sh
+./copal-vm.sh                    # boot copal-vm.img, serial console here
+./copal-vm.sh --graphical        # a window instead, to watch i3 come up
+./copal-vm.sh --snapshot         # discard every write on exit
+./copal-vm.sh --check            # headless: boot, grep, verdict, non-zero on failure
+MEM=4096 CPUS=4 ./copal-vm.sh    # override the defaults
+```
+
+`Ctrl-A X` quits a serial session; `Ctrl-A C` reaches the QEMU monitor. The
+Makefile wraps the common cases:
+
+```sh
+make              # the full list of targets
+make configure    # what this Mac has and what it is missing. Ends in a verdict
+make menu         # ./copal, the front door
+make flow         # the flow chart alone
+make targets      # the target list, one per line  (make boards is the same)
+
+make fresh        # delete the image and build it again — after changing copal-prep.sh
+make auto         # fresh, and unattended
+make vm           # boot it, serial here
+make graphical    # boot it in a window
+make check        # boot headless and report a verdict
+make sd-zero2     # write a physical card for a Pi Zero 2 W
+make img-pc       # write copal-pc.img instead of a card
+
+make lint         # sh -n both scripts, including the generated copal-init.sh
+make space        # what is taking up room, and which target removes it
+make clean        # images, logs, and the config that carries your identity
+make distclean    # clean, and the verified Alpine downloads as well
+```
+
+The first five are the front door under different names: `make menu` runs
+`./copal` and nothing else. There is one target list, in one place, and `make`
+asks the script for it rather than keeping a second copy to get wrong.
+
+`make vm` never rebuilds an existing image. An interrupted install leaves a
+resume marker on the boot partition, so a half-finished image boots into the
+middle of stage 1 and skips what came before — use `make fresh` whenever the
+result is meant to mean something.
+
+**A disk image, as a real UTM machine.** This is the one to use when you want to
+*use* the system rather than test it: a window, a NAT'd network you can SSH
+into, and a folder shared with the Mac.
+
+```sh
+utm/utm-vm.sh create  --target aarch64 --image copal-vm.img
+utm/utm-vm.sh start   --target aarch64
+utm/utm-vm.sh ip      --target aarch64      # -> 192.168.64.7
+utm/utm-vm.sh status  --target aarch64
+utm/utm-vm.sh log     --target aarch64
+utm/utm-vm.sh stop    --target aarch64
+utm/utm-vm.sh refresh --target aarch64 --image copal-vm.img
+```
+
+Leave `--net` alone unless you need a forwarded port: the default `shared` gives
+the guest a real DHCP lease that the host can reach directly, and `ip` resolves
+it by matching the MAC against `/var/db/dhcpd_leases`. See
+[Networking](#networking) for why `emulated` is the only mode where port
+forwarding works at all.
+
+In the VM window, the serial console is at **toolbar → Displays → Serial 1**,
+and it is the more reliable of the two consoles — see [Consoles](#consoles).
+
+**A card, or a USB stick.** Put it in the machine and power on. Log in as `root`
+with no password. On a Pi, the console is HDMI plus a USB keyboard, or a
+USB-serial adapter on the GPIO header — `enable_uart=1` is already set for you.
+On a PC, press whatever key that firmware uses for its boot menu (usually F12,
+F2, Esc, or Option on an Intel Mac) and choose the removable device.
+
+### Step 5 — the stage menu, on the target
+
+There is one command, and where it lives changes exactly once:
+
+```sh
+sh /media/mmcblk0p1/copal-init.sh    # before stage 3 — on a Pi
+sh /media/vda1/copal-init.sh         # before stage 3 — in a VM ('ls /media' if unsure)
+sh /boot/copal-init.sh               # after stage 3, and from then on
+copal                                # a copy on PATH, installed by stage 3
+```
+
+After the reboot in the middle of stage 3 the boot partition is mounted at
+`/boot` and `/media/mmcblk0p1` stops existing. The script finds the partition
+itself either way; the paths above are for when you are typing it.
+
+**Log in as `root`, not as your own account.** Stages 4 to 13 install software,
+and installing is root's job. There are two accounts with two different jobs:
+root builds the system, your account runs the desktop once stage 4 has finished.
+If you did log in as yourself, put `doas` in front rather than logging out.
+
+Every run begins by printing the current state, and that report is the part
+worth reading — it is how you find out what a stage actually did:
+
+```
+Current state
+  hostname        : …          root filesystem : tmpfs (diskless, RAM-resident)
+  kernel flavor   : …          root fs size    : … total, …% used
+  memory          : … MB total, … MB available
+  p2 filesystem   : none (unformatted — macOS could not make ext4)
+  p2 unallocated  : … MB after p2 — stage 8 can reclaim it
+  apk cache       : none — packages will not survive a reboot
+  saved config    : none committed yet
+  cmdline root=   : (none — boots the RAM-resident system)
+  X.Org           : not installed      zram swap    : not active
+  admin user      : user — password set, in wheel
+  home directory  : /home/user (user)
+  root account    : password login enabled (stage 13 locks it)
+  ssh key         : on the card, not yet installed for user
+  dev toolchain   : not installed
+  network         : eth0: 192.168.64.7/24
+```
+
+Then the menu itself:
+
+```
+    1) Base configuration      setup-alpine from answers.txt, then lbu commit
+    2) Persistent packages     ext4 on p2, apk cache on it   (keeps the
+                               RAM-resident root -- gentlest on the card,
+                               enough for a TUI)
+    3) Full root filesystem    move / onto p2 with setup-disk -m sys
+                               (needed for a desktop; writes to the card)
+    4) Graphical desktop       X.Org on the framebuffer, i3, terminal, file
+                               manager, task manager   (needs 3 done first)
+    5) Compressed RAM swap     zram -- the biggest win available on 512 MB
+    6) Authorise the SSH key   the Mac's public key for 'user'
+    7) Development environment gcc/make/gdb, nvim configured for building and
+                               breakpoints, python, geany, AVR, TUI tooling
+    8) Grow COPALROOT          extend p2 into the unallocated space after it.
+                               Non-destructive; works on a mounted root
+    9) Retro emulators         Mini vMac (Mac Plus, fast) and VICE (C64,
+                               from a package now), both with disk images
+                               and launchers set up under your home
+   10) Peripherals and media   wifi, bluetooth, HDMI audio, tcpdump/tshark,
+                               hex editors, HFS and disk-image tools
+   11) Snapshots               rsync snapshots on a third partition, and
+                               Timeshift if you want it (edge/testing only)
+    a) Full automatic install  every stage, unattended, resuming across the
+                               reboot. Only stops for the root password
+   12) Applications           316 small programs -- browser, mail, audio,
+                               editors, viewers, games, gopher/gemini, disc
+                               tools. What the menu installs from too
+   13) Hand over root         lock the root account and log in as 'user'
+                               with doas instead. Checks first; run it last
+   14) The workshop           CAD and 3D printing for the Ender 3, KiCad and
+                               gerbers, ngspice, LaTeX and maths, trackers
+                               and SID. Each bundle says what this port lacks
+   15) SD card and logs       what actually wears a card and what does not;
+                               log policy, and a genuinely read-only root
+    r) Reboot
+    v) Verify and show state
+    q) Quit
+
+    Suggested next: 1
+```
+
+That last line is not decoration. The menu works out the next thing from the
+state it just printed, so following it is a complete strategy on its own:
+
+| What it found | Suggested next |
+|---|---|
+| no saved configuration | `1` |
+| p2 is not ext4 | `2` |
+| no system installed on p2 | `3` |
+| stage 3 done, but `/` is still the tmpfs | `r` — reboot |
+| no X.Org | `4` |
+| no zram | `5` |
+| a key on the card, not yet installed | `6` |
+| no toolchain | `7` |
+| unallocated space after p2 | `8` |
+| nothing outstanding | `v` — verify |
+
+Stages are optional, re-runnable and may be run in any order the prerequisites
+allow. Nothing is a point of no return except stage 3, which reboots, and which
+says so first.
+
+### Getting what you want out of it — four recipes
+
+```mermaid
+flowchart LR
+    subgraph must["the part that is not optional"]
+      direction LR
+      S1["<b>1</b><br/>base config"] --> S2["<b>2</b><br/>ext4 + apk cache"]
+      S2 --> S3["<b>3</b><br/>/ onto the disk"]
+      S3 --> RB(("reboot"))
+    end
+    S2 -.->|"stop here for a<br/>RAM-resident system"| MIN["<b>5</b> zram · <b>6</b> ssh key<br/><i>then lbu commit -d</i>"]
+    RB --> S8["<b>8</b> grow"]
+    RB --> S5["<b>5</b> zram"]
+    RB --> S6["<b>6</b> ssh key"]
+    RB --> S4["<b>4</b> X.Org + i3"]
+    S4 --> S7["<b>7</b> toolchain"]
+    S4 --> S12["<b>12</b> 316 applications"]
+    S4 --> S9["<b>9</b> emulators"]
+    S4 --> S14["<b>14</b> workshop"]
+    RB --> S10["<b>10</b> wifi, audio, capture"]
+    RB --> S11["<b>11</b> snapshots"]
+    S12 --> S13["<b>13</b> lock root, use doas"]
+    S13 --> S15["<b>15</b> card wear, read-only root"]
+```
+
+Stage 4 is the fork in the road. Everything above it is the system; everything
+that depends on it is the desktop. Skipping it is a supported choice, not a
+degraded one — it is the single largest install in the whole sequence, and
+nothing but the graphical software needs it.
+
+**A — everything, unattended.** Answer `a` at the menu, or run `copal --auto`.
+The order comes from a manifest inside the installer, so the run order and the
+progress checklist can never disagree:
+
+```
+1 2 3 · reboot · 8 5 6 4 7 10 12 14 9 13
+```
+
+Stage 3's reboot is survived by a marker file on the boot partition plus a
+resume block in the new root's `/root/.profile`, so logging back in as root
+picks the install up where it stopped. It stops exactly once, in the first
+minute, for two things `setup-alpine` has no answer-file variable for: the
+**root password** and the **git identity** (offered from this Mac's config, so
+Enter accepts). After that you can walk away. It takes hours.
+
+A stage that fails warns and the run carries on, so one bad package cannot cost
+you the other ten stages — which is why the summary at the end matters more than
+it looks. Anything that says *not installed* is a stage that did not finish, and
+re-running it from the menu is safe.
+
+Stage 11 is excluded on purpose: its snapshot support offers to shrink the root
+partition and add a third one, and *yes to everything* is the wrong policy for
+repartitioning a disk you are running from.
+
+While it runs you get a progress screen — white on blue, one bar per phase, one
+per task, and a pane tailing the real `apk` and `make` output. It degrades to
+plain line-by-line output on a serial console, on any terminal under 70×20, or
+with `COPAL_TUI=0`, because a serial console on the GPIO header is a supported
+way to run this.
+
+**B — a desktop, chosen by hand.**
+
+```
+1 · 2 · 3 · reboot · 4 · 5      then 7, 12, 9 and 14 as you like
+```
+
+That is the shortest path to something you can sit in front of. Stage 5 is in
+the minimum rather than the extras because zram is the difference between slow
+and unusable on 512 MB, and it costs nothing to add.
+
+**C — headless, with a real root filesystem.**
+
+```
+1 · 2 · 3 · reboot · 5 · 6 · 7 · 13
+```
+
+SSH is already running before you start: stage 1's `setup-alpine` installs
+`openssh`, so once the machine has a DHCP lease you can leave the console behind
+and drive the rest of the stages over a real terminal with real scrollback.
+Stage 6 authorises the key `copal-prep.sh` copied from this Mac. Run stage 13
+last — it locks the root account and hands administration to your account
+through `doas`, and it checks that you can actually get in before it does.
+
+**D — the smallest thing that persists.**
+
+```
+1 · 2 · 5 · 6        and no stage 3 at all
+```
+
+Alpine's diskless boot puts `/` in a tmpfs sized at about half of RAM — roughly
+200 MB on a 512 MB Zero. That is too small for a desktop, and entirely adequate
+for a TUI. Stage 2 puts the apk cache and the package list on ext4 so installed
+packages survive a reboot while `/` stays in RAM. This is the gentlest
+configuration on an SD card by a wide margin: the card is not written except
+when you ask.
+
+**The catch is the whole catch.** On a RAM-resident root, nothing you change
+persists unless you commit it:
+
+```sh
+lbu commit -d
+```
+
+Stages 1 and 2 commit for you. Nothing after them does. Anything you edit,
+install or configure after stage 2 — including what stages 5 and 6 wrote —
+is gone at the next power-off unless you run that command.
+
+**What each recipe needs.**
+
+| Recipe | RAM to be sensible | Medium | Where it grows |
+|---|---|---|---|
+| D — RAM-resident root | 512 MB | 8 GB card | nowhere; the card is barely written |
+| C — headless, real root | 512 MB with zram, 1 GB comfortably | 8 GB card | the toolchain, 2–3 GB |
+| B — desktop | 1 GB to boot, 2 GB to be comfortable | 16 GB card, or the default 64g image | X.Org and a browser |
+| A — everything | 2 GB and up | the default 64g image; 16 GB is **not** enough | 15–25 GB after a full run |
+
+A 16 GB image does not fail — it quietly produces a system missing half the
+catalogue, because the big installs are gated on `df` and skip themselves rather
+than filling the disk. That silence is why the default is 64g. See
+[Sizing](#sizing).
+
+### Step 6 — the menus inside the desktop
+
+i3 has no start menu and no desktop icons. That is the design, not an omission,
+and there are four ways in:
+
+| Keys | What it opens |
+|---|---|
+| `Super`+`space`, or `Super`+`d` | **dmenu** — everything on `PATH`. Type a few letters, Enter runs it |
+| `Super`+`z` | **copal-menu** — a clickable menu, rebuilt from what is actually installed each time it runs, with an *Install software* branch listing the rest of the catalogue |
+| `Super`+`c` | **copal-center** — one window listing the whole catalogue, installed or not, with a button that either runs it or fetches it |
+| `Super`+`,` | **copal-config** — users and groups, hostname, services, SSH, boot options. Asks `doas` for the root it needs |
+| `Super`+`/`, or `Super`+`F1` | the key list, floating. Shown once at login, because a tiling WM with no menus is unusable until you know the bindings |
+| `Super`+`Shift`+`g` | the other guides |
+| `Super`+`Return` / `Super`+`e` / `Super`+`t` | terminal / file manager / `htop` |
+
+`copal-menu` and `copal-center` exist for the one thing a flat launcher can
+never do: show you what you could install but have not. Software you do not have
+is not discoverable by definition, so both are built from the catalogue rather
+than from `PATH`, and the entries you do not have hand off to `copal-install`.
+
+> **In a UTM window, press Caps Lock instead of Super.**
+> The Mac's Command key arrives in the guest as Super, which is i3's modifier
+> for every one of its bindings — so the host wins every race, and three of
+> those races end the session: `Cmd`+`W` stops the machine mid-write, `Cmd`+`Q`
+> quits UTM entirely, `Cmd`+`Shift`+`Q` logs out of macOS. Nothing inside the
+> guest can defend against that; the host takes the key first. So `.xinitrc`
+> maps **Caps Lock to a second Super**, with not one binding moved. Where Super
+> is eaten by macOS anyway — Spotlight, the app switcher, the screenshot keys —
+> there is a second binding on `Ctrl`+`Alt`. One rule: *where Super is eaten,
+> press Ctrl+Alt.*
+
+### When it does not come up
+
+The order to try things in, cheapest first:
+
+1. **Read the serial console, not the graphical one.** It is a plain UART whose
+   driver is built into the kernel, so it works from the first frame; the
+   graphical console's USB keyboard needs three modules out of modloop before
+   it types anything. In UTM: toolbar → Displays → Serial 1.
+2. **`./copal-vm.sh --check`** — boots headless, captures the serial output,
+   greps it for a login prompt or a known failure, prints a verdict and exits
+   non-zero. About a minute, and it is the thing to run after changing the
+   installer.
+3. **`utm/utm-vm.sh log --target aarch64`** for a running UTM machine, and
+   `progress` for where an unattended install has got to.
+4. **`v` at the stage menu** prints the state report on its own, without running
+   anything.
+5. **Re-run the stage that warned.** Every stage is safe to run again, and the
+   summary after an automatic install names the ones that did not finish.
+6. **The log.** Everything printed is appended to `copal.log` on the boot
+   partition; the first boot's copy is `firstrun.log`, which macOS can read once
+   the image is attached again:
+   ```sh
+   hdiutil attach -imagekey diskimage-class=CRawDiskImage copal-vm.img
+   ```
+7. **No network before stage 1 is expected**, not a fault — Alpine's diskless
+   boot leaves `eth0` down and `setup-alpine` is what configures it. To test
+   connectivity before then, see [Networking](#networking).
+8. **A rebuild that means something starts from nothing.** An interrupted
+   install leaves a resume marker, so `make vm` on a half-finished image boots
+   into the middle of stage 1. `make fresh` deletes the image and starts again.
+
+
+### Cleaning up — disk space, and the files that carry your name
+
+Three levels, and what separates them is the cost of undoing them.
+
+```sh
+make space        # removes nothing. Says what is here and which target takes it
+make clean        # build output, logs, and the generated config. Costs a rebuild
+make distclean    # clean, and the payloads too. Costs a re-download as well
+```
+
+`make space` is the one to run first, because the numbers are not what `ls`
+says:
+
+```console
+$ make space
+
+WHAT IS IN THIS FOLDER
+
+  Measured with du -- what is on disk, not what ls claims. The images
+  are sparse: 64 GB apparent, and only what has been written to them.
+
+  Disk images and EFI stores               1.5G   make clean
+  Logs and build transcripts               120K   make clean
+  Generated config -- identity               --   nothing here
+  macOS metadata                             --   nothing here
+  Verified Alpine downloads                1.8G   make distclean
+
+  Everything above                         3.4G   make distclean
+
+  Registered UTM machines live in UTM's own container, not here, and
+  no make target touches them: utm/utm-vm.sh delete --target aarch64
+```
+
+**The images are sparse.** A 64g image reports 64 GB to `ls -lh` and occupies
+only what has actually been written to it — about 550 MB fresh, 15–25 GB after
+a full fifteen-stage run. Every size above is `du`, the real one. Reporting the
+ceiling would make each of those numbers wrong by two orders of magnitude, and
+`ls -lh copal-vm.img` is why people think this repository eats their disk.
+
+**`make clean` removes more than build output, on purpose.** Alongside the
+images and the EFI variable stores it removes the small generated files that
+carry an identity — and the transcripts that quote it back:
+
+| Removed | What is in it |
+|---|---|
+| `copal.conf`, `answers.txt`, `usercfg.txt` | the admin username and the chosen hostname |
+| `copal-git` | the git name and email read from **this Mac's** git config |
+| `authorized_keys` | your SSH **public** key. The private half never leaves the Mac |
+| `copal-prep-auto*.log`, `copal-vm-check.log`, `firstrun.log` | all three, quoted verbatim — `Git identity offered: …` and `Authorised key: …` |
+| `copal-auto`, `copal-timings` | which stages an interrupted install had attempted |
+| `.DS_Store`, `._*` | Finder droppings |
+
+None of it is a password, and nothing authenticates with any of it. It is still
+a real name and a real address belonging to whoever wrote the card, sitting in a
+working copy of a public repository. `.gitignore` already refuses to commit
+these — see the block at the end of that file, which lists them for exactly this
+reason — so the point of removing them here is different: a file nobody deleted
+is a file that gets copied somewhere else eventually, into a tarball, an issue
+attachment, or a `cp -r` of the folder onto a shared disk.
+
+`make clean` reports what it freed, and says what it deliberately left alone:
+
+```console
+$ make clean
+==> Removed the images, EFI variable stores, logs and the
+    generated config that carried the identity. 1.6G reclaimed.
+    work/ kept -- verified payloads, and a download to replace. make distclean
+    UTM machines kept -- utm/utm-vm.sh delete --target aarch64
+```
+
+**What it does not touch.** `work/` holds the checksum-verified Alpine payloads
+and the GRUB ISOs — about 1.8 GB, and the only thing here that costs bandwidth
+rather than CPU to replace, which is why it belongs to `make distclean` and not
+to `make clean`. Registered UTM machines live in UTM's own sandbox container
+rather than in this folder, and no make target deletes one: use
+`utm/utm-vm.sh delete --target aarch64`.
+
+---
 
 ## Targets
 
@@ -264,39 +1096,7 @@ it becomes editable, `shellcheck`-able and testable — but it is a refactor of
 working code, so it happens *after* the two VMs can prove a refactor did not
 break anything.
 
-## Quick start
-
-Requires macOS, `curl`, `bsdtar` and `shasum` (all stock), plus
-[UTM](https://mac.getutm.app) for the VM targets.
-
-```sh
-./copal
-```
-
-That is the front door, and it is the recommended way in. It shows the whole
-process on one screen before anything happens — what runs on this Mac, what
-runs on the machine being built, and where the line between them falls — then a
-target menu where each entry states its equipment, CPU, minimum requirements and
-expected use case. It writes nothing and touches no disk; every path out of it
-ends in an explicit *Begin* that names the script it hands over to.
-
-```sh
-./copal --flow      # the flow chart alone
-./copal --check     # what THIS Mac can build: tools, RAM, disk, UTM, qemu
-./copal --targets   # the target list, one per line
-```
-
-The underlying script is still there, and still takes the same variables — the
-menu is a front door, not a wrapper that hides things:
-
-```sh
-MODEL=zero2 ./copal-prep.sh                      # a card for a Pi
-MODEL=pc    ./copal-prep.sh                      # a PC / Intel Mac, 64-bit UEFI
-MODEL=vm    ./copal-prep.sh --image copal-vm.img # an image; nothing physical is touched
-./copal-vm.sh --graphical
-```
-
-### Sizing
+## Sizing
 
 `IMAGE_SIZE` defaults to **64g**, which yields a 4 GB FAT boot partition and
 **~60 GiB of root**. The image is sparse — a fresh one is about 550 MB on disk
@@ -316,13 +1116,6 @@ Lower it freely for a test image that will never run past stage 4:
 IMAGE_SIZE=12g MODEL=vm ./copal-prep.sh --fresh --image test.img
 ```
 
-Then, on the target, as root:
-
-```sh
-sh /media/mmcblk0p1/copal-init.sh     # the menu: fifteen optional stages
-copal --auto                          # or run all of them unattended
-```
-
 The full account of what those stages do — the catalogue, the desktop, the key
 bindings, the account model, the SD-card wear analysis — is in
 **[the handbook](docs/copal-handbook.md)**.
@@ -335,7 +1128,7 @@ bindings, the account model, the SD-card wear analysis — is in
 | `copal-prep.sh` | Runs on the **Mac**. Downloads and verifies Alpine, prepares the medium, generates everything the target needs |
 | `copal-vm.sh` | Boots a prepared image under QEMU. `--check` boots headless and reports a verdict — **the automated verification path** |
 | `utm/utm-vm.sh` | Wraps a prepared image in a UTM VM: NAT, shared folder, UEFI boot — **the interactive path** |
-| `Makefile` | `make image`, `make vm`, `make check`, `make lint` |
+| `Makefile` | Names the combinations worth having a name for, and verifies the host. `make configure`, `make fresh`, `make vm`, `make check`, `make space`, `make clean` |
 | `fetch-minivmac.sh` | Assembles the Mini vMac working set on demand — nothing binary is tracked here |
 | `tools/minivmac/` | Mini vMac launcher scripts |
 | `docs/copal-handbook.md` | The original Copal handbook. Alpine, the card, the stages, the desktop, reference |
