@@ -7,6 +7,7 @@
 #   make vm            build if needed, boot, serial console on this terminal
 #   make fresh         delete the VM image and build it again from nothing
 #   make check         boot headless, print a verdict, exit non-zero if it hung
+#   make utm           register the VM with UTM and start it (utm-x86 for x86_64)
 #   make sd-zero2      write a physical card for a Pi Zero 2 W
 #   make img-pc        write a bootable disk image for a PC
 #   make lint          syntax-check both scripts, including the generated one
@@ -52,7 +53,7 @@ model_of = $(patsubst pizero%,zero%,$(1))
 
 .DEFAULT_GOAL := help
 .PHONY: help menu flow targets boards configure require-tools vm graphical check \
-        fresh auto image refresh lint space clean distclean
+        fresh auto image refresh utm utm-x86 lint space clean distclean
 
 help:
 	@printf '\nCopal Linux -- make targets\n\n'
@@ -67,6 +68,9 @@ help:
 	@printf '                  builds it first if absent. Ctrl-A X quits, Ctrl-A C for the monitor.\n'
 	@printf '  make graphical  the same, in a window, to watch i3 come up\n'
 	@printf '  make check      boot headless, verdict, exit non-zero if no login prompt (log: %s)\n' '$(LOG)'
+	@printf '  make utm        register the aarch64 machine with UTM and start it\n'
+	@printf '  make utm-x86    the same for x86_64 -- \033[33mthe only way to boot that image\033[0m\n'
+	@printf '                  Creates the VM only if there is not one already. Never replaces one.\n'
 	@printf '\n'
 	@printf '\033[1m  Building the VM image\033[0m\n'
 	@printf '  make fresh      delete the image and build it from nothing.\n'
@@ -256,6 +260,46 @@ auto: | require-tools $(BUILDDIR)
 
 refresh: | require-tools
 	MODEL=$(MODEL) $(PREP) --refresh
+
+# --------------------------------------------------------------------- UTM ---
+#
+# copal-prep.sh writes an image and stops there on purpose. A UTM machine is
+# not a file in this repository: it is a bundle registered inside another
+# application's sandbox container, it survives clean, distclean and deleting
+# this checkout entirely, and a script whose job is "write a disk image" has no
+# business quietly creating one. These targets exist so the step is still a
+# single command -- named and asked for, rather than a side effect of building.
+#
+# `create` refuses to replace an existing machine without --force, which is the
+# correct behaviour and would also make `make utm` fail the second time it ran.
+# So create happens only when `status` reports there is no machine, and start is
+# unconditional. Running either target twice is safe and destroys nothing.
+#
+# utm-x86 matters more than it looks. copal-vm.sh runs qemu-system-aarch64, so
+# for the x86_64 image UTM is not one of two ways to boot it -- it is the only
+# way, and until now it was the only boot route with no target behind it.
+
+UTMRUN  := ./utm/utm-vm.sh
+X86IMG  ?= $(BUILDDIR)/copal-vmx86.img
+
+# The x86_64 counterpart of $(IMG). Same rule, different MODEL: vmx86 is what
+# sets ARCH=x86_64 with VM=1, and what ./copal offers as target 9.
+$(X86IMG): | require-tools $(BUILDDIR)
+	MODEL=vmx86 $(PREP) --image $(X86IMG)
+
+utm: image
+	@$(UTMRUN) status --target aarch64 >/dev/null 2>&1 \
+	    || $(UTMRUN) create --target aarch64 --image $(IMG)
+	@$(UTMRUN) start --target aarch64
+	@printf '\033[36m==>\033[0m Started. Find its address with: %s ip --target aarch64\n' '$(UTMRUN)'
+	@printf '    \033[2m%s\033[0m\n' 'Serial console: the VM window toolbar -> Displays -> Serial 1'
+
+utm-x86: $(X86IMG)
+	@$(UTMRUN) status --target x86_64 >/dev/null 2>&1 \
+	    || $(UTMRUN) create --target x86_64 --image $(X86IMG)
+	@$(UTMRUN) start --target x86_64
+	@printf '\033[36m==>\033[0m Started. Emulated by TCG, so expect it to be slow.\n'
+	@printf '    \033[2m%s\033[0m\n' 'Serial console is on ttyS0 here, not ttyAMA0.'
 
 # ------------------------------------------------------- cards and boards ---
 

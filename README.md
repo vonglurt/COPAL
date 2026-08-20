@@ -486,9 +486,11 @@ make targets      # the target list, one per line  (make boards is the same)
 
 make fresh        # delete the image and build it again — after changing copal-prep.sh
 make auto         # fresh, and unattended
-make vm           # boot it, serial here
+make vm           # boot it under QEMU, serial here
 make graphical    # boot it in a window
 make check        # boot headless and report a verdict
+make utm          # register the aarch64 machine with UTM and start it
+make utm-x86      # the same for x86_64 — the only way to boot that image
 make sd-zero2     # write a physical card for a Pi Zero 2 W
 make img-pc       # write build/copal-pc.img instead of a card
 
@@ -520,6 +522,25 @@ utm/utm-vm.sh log     --target aarch64
 utm/utm-vm.sh stop    --target aarch64
 utm/utm-vm.sh refresh --target aarch64 --image build/copal-vm.img
 ```
+
+`make utm` and `make utm-x86` wrap the create-and-start pair, building the
+image first if it is absent. They create a machine only when there is not one
+already and never replace one, so running either twice is safe:
+
+```sh
+make utm          # build/copal-vm.img    -> the Copal-aarch64 machine
+make utm-x86      # build/copal-vmx86.img -> the Copal-x86_64 machine
+```
+
+**`copal-prep.sh` will not create a UTM machine for you, and that is deliberate.**
+A UTM machine is not a file in this repository — it is a bundle registered
+inside another application's sandbox container, and it survives `make clean`,
+`make distclean` and deleting this checkout entirely. A script whose job is
+*write a disk image* should not quietly leave one behind. It prints the two
+commands instead, and these targets are the same step with a name.
+
+For the x86_64 image that step is not optional: `copal-vm.sh` runs
+`qemu-system-aarch64`, so UTM is the only way to boot it.
 
 Leave `--net` alone unless you need a forwarded port: the default `shared` gives
 the guest a real DHCP lease that the host can reach directly, and `ip` resolves
