@@ -570,8 +570,20 @@ do_start() {
     require_bundle
     [ -x "$UTMCTL" ] || die "utmctl not found at $UTMCTL"
     info "Starting $NAME..."
+    # The failure this almost always is: UTM was ALREADY RUNNING when the
+    # bundle was written, and it does not rescan its documents folder while
+    # up -- so the machine it is being asked to start is one it has never
+    # seen. Handing it the bundle path registers it; `open -a UTM` on its own
+    # does not, it only brings the existing window forward, which is why that
+    # is spelled out rather than left as "open UTM".
     "$UTMCTL" start "$NAME" || die "utmctl could not start '$NAME'.
-       If UTM has not noticed the bundle yet, open UTM once:  open -a UTM"
+       UTM has not noticed the bundle. This happens when UTM was already
+       running while it was written -- it does not rescan its folder.
+
+       Register it by opening the BUNDLE, not the app, then start again:
+
+           open -a UTM \"$BUNDLE\"
+           $0 start --target $TARGET"
     if [ "$NET_MODE" = emulated ]; then
         info "Started. SSH answers on localhost:$SSH_PORT once the guest is running sshd."
     else
