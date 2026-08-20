@@ -33,6 +33,8 @@
 #   utm/utm-vm.sh refresh --target aarch64 --image copal-vm.img
 #   utm/utm-vm.sh delete  --target aarch64
 #   utm/utm-vm.sh config  --target x86_64        # print the plist, write nothing
+#   utm/utm-vm.sh progress --target x86_64       # how far the install has got
+#   utm/utm-vm.sh log     --target x86_64        # follow the install transcript
 #
 set -euo pipefail
 
@@ -62,9 +64,9 @@ usage() { sed -n '5,33p' "$0" | sed 's/^# \{0,1\}//'; }
 [ $# -gt 0 ] || { usage; exit 0; }
 ACTION="$1"; shift
 case "$ACTION" in
-    create|start|stop|status|delete|refresh|config|ip) : ;;
+    create|start|stop|status|delete|refresh|config|ip|log|progress) : ;;
     -h|--help) usage; exit 0 ;;
-    *) die "unknown action '$ACTION'. One of: create start stop status delete refresh config ip" ;;
+    *) die "unknown action '$ACTION'. One of: create start stop status delete refresh config ip log progress" ;;
 esac
 
 while [ $# -gt 0 ]; do
@@ -620,6 +622,166 @@ do_ip() {
     info "ssh root@$ip   (or: ssh $(plutil -extract Information.Name raw -o - "$BUNDLE/config.plist" 2>/dev/null))"
 }
 
+# Watching an install that is going to take hours.
+#
+# copal-init.sh appends every run to copal.log on the FAT boot partition, which
+# is world-readable and -- being FAT -- has no permissions of its own to get
+# wrong. That makes it the one file always readable no matter what state the
+# root filesystem is in, which is exactly when you most want to read it.
+#
+# busybox is invoked explicitly for every tool here. Once stage 12 has run, the
+# GNU coreutils and grep are installed over busybox's applets, and those are
+# dynamically linked against libraries the musl loader resolves through a file
+# in /etc. If /etc is unreadable to the calling account -- which a leaked umask
+# used to arrange -- then grep, sed and pgrep all die with "Permission denied"
+# on their own libraries, and the tooling you would reach for to diagnose the
+# problem is the tooling the problem breaks. busybox's applets are one static
+# binary and keep working.
+guest_ip() {
+    _ip=$(do_ip 2>/dev/null | head -1)
+    [ -n "$_ip" ] || die "no DHCP lease for this VM yet -- has stage 1 run?"
+    printf '%s' "$_ip"
+}
+
+# The remote work is written as a heredoc piped into `sh -s` rather than passed
+# as an argument to ssh. Quoting a script through an ssh argument means every
+# quote is interpreted twice, once by the local shell and once by the remote
+# one, and the first version of this got that wrong in a way that produced
+# `sh: syntax error: unexpected "("` on the far side. A heredoc is passed
+# through untouched.
+do_log() {
+    require_bundle
+    _ip=$(guest_ip)
+    info "Following /boot/copal.log on $_ip. Ctrl-C stops watching, not the install."
+    ssh -o BatchMode=yes -o StrictHostKeyChecking=no "${GUEST_USER:-user}@$_ip" \
+        'busybox tail -f -n 40 /boot/copal.log'
+}
+
+# Two samples make a rate; one makes a number. The previous sample is kept on
+# the HOST, keyed by VM name, because the guest is busy and should not be asked
+# to remember anything -- and because a progress command that has to sleep to
+# measure a rate is a progress command nobody runs twice.
+#
+# So each call records (epoch, count) and compares against whatever the last
+# call left behind. The first call after a while shows no rate, which is honest:
+# it has nothing to compare with.
+_sample_file() { printf '%s/copal-progress-%s' "${TMPDIR:-/tmp}" "$NAME"; }
+
+_rate_line() {  # <built> <total>
+    _b="$1"; _t="$2"
+    _now=$(date +%s)
+    _f=$(_sample_file)
+    if [ -r "$_f" ]; then
+        read -r _pt _pb < "$_f" 2>/dev/null || { _pt=""; _pb=""; }
+        if [ -n "${_pt:-}" ] && [ -n "${_pb:-}" ] && [ "$_b" -gt "$_pb" ] && [ "$_now" -gt "$_pt" ]; then
+            awk -v b="$_b" -v t="$_t" -v pb="$_pb" -v dt="$((_now - _pt))" 'BEGIN{
+                rate = (b - pb) / dt
+                left = t - b
+                if (rate > 0 && left > 0) {
+                    eta = left / rate
+                    printf "    rate          %.1f per minute, %d left, ETA ~%d min\n",
+                           rate * 60, left, (eta + 59) / 60
+                } else if (left <= 0) {
+                    printf "    rate          complete\n"
+                }
+            }'
+        fi
+    fi
+    printf '%s %s\n' "$_now" "$_b" > "$_f" 2>/dev/null || true
+}
+
+do_progress() {
+    require_bundle
+    _ip=$(guest_ip)
+    _out=$(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
+        "${GUEST_USER:-user}@$_ip" 'sh -s' <<'REMOTE'
+L=/boot/copal.log
+printf '\n'
+# "DONE=" in copal-auto is the installer's own wording and it is misleading if
+# taken at face value: auto_mark records a stage BEFORE running it, so that a
+# stage which reboots from inside itself (stage 3) is not retried for ever. The
+# last number in the list is therefore the stage RUNNING NOW, not the last one
+# finished. Labelled accordingly, because reading it the other way makes an
+# install look an entire stage further along than it is.
+printf '  stages started: %s\n' "$(busybox sed -n 's/^DONE=//p' /boot/copal-auto 2>/dev/null || echo 'not an automatic run')"
+printf '  (last is running, not finished)\n'
+printf '  current stage : %s\n' "$(busybox grep -aoE 'Stage [0-9]+: .{0,44}' "$L" 2>/dev/null | busybox tail -1)"
+printf '  disk used     : %s\n' "$(busybox df -h / | busybox awk 'NR==2 {print $3 " of " $2 " (" $5 ")"}')"
+printf '  load average  : %s\n' "$(busybox cut -d' ' -f1-3 /proc/loadavg)"
+printf '  transcript    : %s bytes, last written %s\n' \
+    "$(busybox wc -c < "$L")" "$(busybox date -r "$L" '+%H:%M:%S' 2>/dev/null)"
+printf '  time now      : %s\n' "$(busybox date '+%H:%M:%S')"
+# --- artifact counts for the steps that go quiet for a long time -----------
+#
+# A load average of 1.00 tells you something is running. It does not tell you
+# whether it is a third of the way through or will still be going at midnight.
+# Some steps have a countable output and a knowable total, and for those a
+# ratio is worth far more than a spinner.
+#
+# TeX Live is the worst offender and the first one handled. `apk add texlive`
+# ends by running `fmtutil --sys --all`, which rebuilds every TeX format from
+# source: pure computation, single-threaded, writing one small .fmt at the end
+# of each. The transcript says nothing for the duration and the disk does not
+# grow measurably. Under emulation it can run for well over an hour.
+#
+#   built    .fmt files under texmf-var
+#   total    enabled entries in fmtutil.cnf -- lines starting with a letter;
+#            the disabled ones are commented '#!' and are not built
+#
+# Add further cases here as they are found. The shape is the same: something
+# countable on disk over something knowable from a config file.
+_fmt_total=$(busybox grep -cE '^[a-zA-Z]' /usr/share/texmf-dist/web2c/fmtutil.cnf 2>/dev/null || echo 0)
+if [ "$_fmt_total" -gt 0 ]; then
+    _fmt_built=$(busybox find /usr/share/texmf-var -name '*.fmt' 2>/dev/null | busybox wc -l)
+    printf '\n  artifacts:\n'
+    printf '#SAMPLE fmt %s %s\n' "$_fmt_built" "$_fmt_total"
+    printf '    TeX formats   %s / %s   %s\n' "$_fmt_built" "$_fmt_total" \
+        "$(busybox awk -v b="$_fmt_built" -v t="$_fmt_total" 'BEGIN{
+              n=int(b*24/t); s="["; for(i=0;i<24;i++) s=s (i<n?"=":" "); printf "%s] %d%%", s, b*100/t }')"
+fi
+
+printf '\n  working on:\n'
+# The transcript goes quiet during a long package operation, because output is
+# on the console until a stage ends. What is actually running is the better
+# answer, and is why this looks at the process table rather than only the log.
+# $8 is busybox top's %CPU and already carries its own per-cent sign; $9 is
+# where COMMAND starts. Both were off by one in the first version.
+busybox top -b -n1 2>/dev/null | busybox awk 'NR>4 && $8+0 > 2 {printf "    %6s  %s\n", $8, $9" "$10" "$11}' | busybox head -4
+# Per-stage timings, if the installer that built this image records them.
+# Written to the FAT boot partition, so they survive stage 3's reboot and are
+# readable whatever state the root filesystem is in.
+if [ -r /boot/copal-timings ]; then
+    printf '\n  stage timings:\n'
+    busybox awk '
+        $1 == "START" && $3 > 0 { st[$2] = $3; if (!($2 in seen)) { seen[$2]=1; ord[++n] = $2 } }
+        $1 == "END"   && $3 > 0 { en[$2] = $3 }
+        END {
+            now = NOW; total = 0
+            for (i = 1; i <= n; i++) {
+                s = ord[i]
+                if (s in en)      { d = en[s] - st[s]; total += d; tag = "" }
+                else              { d = now - st[s];             tag = "  <- running now" }
+                printf "    stage %-3s %3d min %02d sec%s\n", s, d/60, d%60, tag
+            }
+            if (total > 0) printf "    %-9s %3d min %02d sec\n", "so far", total/60, total%60
+        }' NOW="$(busybox date +%s)" /boot/copal-timings
+fi
+
+printf '\n  last lines of the transcript:\n'
+busybox tail -5 "$L" | busybox cut -c1-96 | busybox sed 's/^/    /'
+printf '\n'
+REMOTE
+)
+    # The marker line is for this script, not for the reader: print everything
+    # else verbatim, then use it to work out how fast the count is moving.
+    printf '%s\n' "$_out" | grep -v '^#SAMPLE '
+    _s=$(printf '%s\n' "$_out" | grep '^#SAMPLE fmt ' | head -1)
+    if [ -n "$_s" ]; then
+        set -- $_s
+        [ $# -ge 4 ] && _rate_line "$3" "$4"
+    fi
+}
+
 case "$ACTION" in
     create)  do_create  ;;
     start)   do_start   ;;
@@ -629,4 +791,6 @@ case "$ACTION" in
     refresh) do_refresh ;;
     config)  do_config  ;;
     ip)      do_ip      ;;
+    log)     do_log     ;;
+    progress) do_progress ;;
 esac

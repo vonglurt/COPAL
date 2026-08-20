@@ -11360,6 +11360,58 @@ auto_is_done() { case " $AUTO_DONE " in *" $1 "*) return 0 ;; esac; return 1; }
 # says which, and it can be re-run from the menu.
 auto_mark() { AUTO_DONE="$AUTO_DONE $1"; auto_state_save; }
 
+# Per-stage timings, on the boot partition beside the state file.
+#
+# copal.log carries one timestamp per RUN -- the "===== copal-init.sh: <date>"
+# banner -- which is enough to know when an install started and nothing about
+# where its hours went. Recording each stage's start and end costs two lines of
+# a text file and answers the question people actually ask: which stage is slow,
+# and how long will the rest take on a machine like this one.
+#
+# On the FAT boot partition on purpose. It is readable from the Mac while the
+# guest is still running, it survives stage 3's reboot, and it has no
+# permissions of its own to get wrong -- which matters more than it should,
+# given what a stray umask did to the root filesystem.
+#
+# Epoch seconds, not a formatted date: durations are the point, and subtracting
+# two integers needs no date parser. A machine with no clock yet writes 0, and
+# the summary skips any pair it cannot subtract sensibly.
+TIMEFILE="$BOOT/copal-timings"
+auto_time() {  # <START|END> <stage>
+    mount -o remount,rw "$BOOT" 2>/dev/null || true
+    printf '%s %s %s\n' "$1" "$2" "$(date +%s 2>/dev/null || echo 0)" \
+        >> "$TIMEFILE" 2>/dev/null || true
+    sync 2>/dev/null || true
+}
+
+# What the timings add up to. A stage with a START and no END was interrupted --
+# which for stage 3 is not a fault but the design, since it reboots from inside
+# itself, so it is reported as such rather than as an error.
+auto_timing_report() {
+    [ -r "$TIMEFILE" ] || return 0
+    say "Where the time went"
+    awk '
+        $1 == "START" && $3 > 0 { start[$2] = $3; order[++n] = $2 }
+        $1 == "END"   && $3 > 0 { end[$2]   = $3 }
+        END {
+            total = 0
+            for (i = 1; i <= n; i++) {
+                s = order[i]
+                if (!(s in start)) continue
+                if (s in end) {
+                    d = end[s] - start[s]
+                    total += d
+                    printf "    stage %-3s %3d min %02d sec\n", s, d / 60, d % 60
+                } else {
+                    printf "    stage %-3s (no end recorded -- rebooted from inside it)\n", s
+                }
+            }
+            if (total > 0)
+                printf "    %-9s %3d min %02d sec of measured stages\n", "TOTAL", total / 60, total % 60
+        }' "$TIMEFILE"
+    note "raw timings: $TIMEFILE"
+}
+
 auto_finish() {
     rm -f "$AUTOFILE" 2>/dev/null || true
     # Take the resume hook off the new root as well, so a later login is a
@@ -11497,6 +11549,7 @@ MSG
         tui_stage_begin "$_s"
         say "AUTO: stage $_s"
         auto_mark "$_s"
+        auto_time START "$_s"
         # This script runs under 'set -e', which is right for an interactive
         # session and wrong for an unattended one: a single stage returning
         # non-zero would end the whole install silently, hours in, with no
@@ -11521,6 +11574,9 @@ MSG
         esac
         _rc=$?
         set -e
+        # After the stage, so a stage that reboots from inside itself (stage 3)
+        # simply has no END -- which is exactly what the report should say.
+        auto_time END "$_s"
         [ "$_rc" = 0 ] || warn "stage $_s exited $_rc -- carrying on with the rest"
         tui_stage_end
     done
@@ -11541,6 +11597,9 @@ MSG
         rm -f "$TUI_OUTFILE"
     fi
     say "AUTOMATIC INSTALL COMPLETE"
+    # Before auto_finish, which removes the state file: the timings live beside
+    # it and are worth reading while the run is still fresh in mind.
+    auto_timing_report
     auto_finish
     AUTO=0
     state_report
