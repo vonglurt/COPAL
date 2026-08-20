@@ -110,6 +110,10 @@ case "${TARGET:-}" in
         DEFAULT_NAME="Copal-aarch64"
         DEFAULT_CPUS=4
         DEFAULT_SSH=2222
+        # No i8042 exists on ARM -- the PS/2 controller is an x86 device. The
+        # USB keyboard is the only option here, and it works because the
+        # aarch64 guest loads usbhid out of modloop.
+        PS2=false
         ;;
     x86_64|x64|amd64|utm-x86_64)
         TARGET=x86_64
@@ -127,6 +131,21 @@ case "${TARGET:-}" in
         DEFAULT_NAME="Copal-x86_64"
         DEFAULT_CPUS=2
         DEFAULT_SSH=2223
+        # ON, and this is not a preference -- it decides whether the graphical
+        # console has a keyboard at all.
+        #
+        # UTM attaches a usb-kbd, and with PS2Controller off it also passes
+        # i8042=off to the q35 machine, so usb-kbd is the ONLY keyboard. But
+        # Alpine builds USB HID as modules and the PS/2 driver into the kernel:
+        #
+        #     CONFIG_USB_HID=m  CONFIG_HID_GENERIC=m  CONFIG_USB_XHCI_HCD=m
+        #     CONFIG_KEYBOARD_ATKBD=y  CONFIG_SERIO_I8042=y
+        #
+        # So a USB keyboard needs three modules out of modloop before it types
+        # anything, and a PS/2 one works from the first frame with none. Turning
+        # the controller off left the graphical console mute and forced the user
+        # to the serial display to log in at all. It costs nothing to leave on.
+        PS2=true
         ;;
     "") die "--target is required: aarch64 or x86_64" ;;
     *)  die "unknown --target '$TARGET'. Use aarch64 or x86_64." ;;
@@ -237,6 +256,10 @@ write_config() {  # <disk uuid> <vm uuid> <mac>
 
 Built by utm-vm.sh from a copal-prep.sh image.
 
+If the graphical console will not accept typing, switch UTM's display:
+    the VM window's toolbar -&gt; Displays -&gt; Serial 1
+That console is a plain UART and always works.
+
 First boot:  login 'root', password BLANK (just Enter).
 Then:        ls /media/  and  sh /media/vda1/copal-init.sh
 After stage 3 the path becomes /boot/copal-init.sh.
@@ -301,7 +324,7 @@ fi)</array>
 		<key>Hypervisor</key>
 		<${HYPERVISOR}/>
 		<key>PS2Controller</key>
-		<false/>
+		<${PS2}/>
 		<key>RNGDevice</key>
 		<true/>
 		<key>RTCLocalTime</key>
@@ -468,6 +491,15 @@ do_create() {
 
       ls /media/                      # expect vda1
       sh /media/vda1/copal-init.sh    # the fifteen stages
+
+  IF THE GRAPHICAL CONSOLE WILL NOT TYPE, switch UTM to the serial display:
+
+      the VM window's toolbar  ->  Displays  ->  Serial 1
+
+  That console is a plain UART with a driver built into the kernel, so it works
+  before anything has been loaded out of modloop, and it is the one to use if
+  the window takes no keystrokes. Both are wired up on purpose: the graphical
+  one is for watching i3 come up, the serial one is for when it cannot.
 
   Stage 1 is what configures the network. Until it has run, eth0 is down and
   the guest has no address -- that is Alpine's diskless default, not a fault.

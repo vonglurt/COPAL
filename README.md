@@ -127,6 +127,33 @@ fault. To test connectivity before stage 1, from the guest console:
 ip link set eth0 up && udhcpc -i eth0 && ping -c3 dl-cdn.alpinelinux.org
 ```
 
+## Consoles
+
+Every UTM target gets **both** a graphical display and a serial console, on
+purpose. The graphical one is for watching i3 come up; the serial one is for
+when it cannot, and it is the more reliable of the two:
+
+```
+the VM window's toolbar  ->  Displays  ->  Serial 1
+```
+
+The serial port is a plain UART whose driver is built into the kernel, so it
+works from the first frame. The graphical console's keyboard may not be, and on
+x86 that distinction bit us. UTM attaches a `usb-kbd`, and with
+`PS2Controller: false` it also passes `i8042=off`, leaving USB as the only
+keyboard — but Alpine builds USB HID as *modules* and PS/2 into the kernel:
+
+```
+CONFIG_USB_HID=m   CONFIG_HID_GENERIC=m   CONFIG_USB_XHCI_HCD=m
+CONFIG_KEYBOARD_ATKBD=y   CONFIG_SERIO_I8042=y
+```
+
+So the USB keyboard needs three modules out of modloop before it types
+anything, while the PS/2 one needs none. `utm-vm.sh` now sets
+`PS2Controller: true` for `utm-x86_64`. It stays `false` for `utm-aarch64`,
+where there is no i8042 to enable — the i8042 is an x86 device, so ARM guests
+depend on USB HID either way.
+
 ## Status
 
 This is a migration in progress, and the table says where it actually stands
