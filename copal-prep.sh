@@ -665,16 +665,51 @@ on_interrupt() {
     fi
     # An image left attached is worse than one left half-written: the next run
     # refuses to attach it twice, and the reason is not obvious from the file.
-    # ${IMAGE_DEV:-} because this trap is installed long before attach_image
-    # runs, and under 'set -u' a bare $IMAGE_DEV would abort the abort.
-    if [ -n "${IMAGE_DEV:-}" ]; then
-        sync 2>/dev/null || true
-        hdiutil detach "$IMAGE_DEV" >/dev/null 2>&1 || true
-        printf '\033[33mDetached %s (%s).\033[0m\n' "$IMAGE_DEV" "${IMAGE_PATH:-image}" >&2
-    fi
+    release_image
     exit 130
 }
+
+# Detach whatever THIS run attached, and unmount what it mounted. Safe to call
+# twice, and safe to call when nothing was ever attached.
+#
+# ${IMAGE_DEV:-} because the traps are installed long before attach_image runs,
+# and under 'set -u' a bare $IMAGE_DEV would abort the abort. The -e test is
+# what makes it idempotent: a successful run has already ejected the device, so
+# the node is gone and there is nothing to say.
+release_image() {
+    [ -n "${IMAGE_DEV:-}" ] || return 0
+    [ -e "$IMAGE_DEV" ] || { IMAGE_DEV=""; return 0; }
+    sync 2>/dev/null || true
+    diskutil unmountDisk "$IMAGE_DEV" >/dev/null 2>&1 || true
+    hdiutil detach "$IMAGE_DEV" >/dev/null 2>&1 \
+        || hdiutil detach -force "$IMAGE_DEV" >/dev/null 2>&1 || true
+    IMAGE_DEV=""
+}
+
+# EXIT, and not only INT and TERM -- which is what this trap used to be, and
+# the omission was expensive.
+#
+# die() is a plain `exit 1`. It is not a signal, so an INT/TERM trap never sees
+# it, and every failed build therefore left its image attached and its boot
+# partition mounted at /Volumes/COPALBOOT. On its own that is untidy. In a run
+# that builds nine boards one after another it is fatal to all of them: macOS
+# mounts the next board's partition as "COPALBOOT 1", the mount check correctly
+# refuses to write through somebody else's mount point, and every remaining
+# board fails for a reason that has nothing to do with it. One board failing
+# became eight.
+#
+# The status has to be captured and re-raised by hand; an EXIT trap that ends
+# in anything else silently rewrites the exit code of the whole script.
+on_exit() {
+    _exit_status=$?
+    if [ -n "${IMAGE_DEV:-}" ] && [ -e "${IMAGE_DEV:-/nonexistent}" ]; then
+        printf '\033[33mReleasing %s (%s).\033[0m\n' "$IMAGE_DEV" "${IMAGE_PATH:-image}" >&2
+        release_image
+    fi
+    exit "$_exit_status"
+}
 trap on_interrupt INT TERM
+trap on_exit EXIT
 
 # --------------------------------------------------------------- download ---
 # Which artefact carries the system, per platform. Same boot/ layout inside
