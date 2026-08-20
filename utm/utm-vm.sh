@@ -564,11 +564,62 @@ do_create() {
   first.
 
 NEXT
+    # A bundle UTM does not know about is not yet a machine anybody can start,
+    # and create is exactly when that happens -- UTM is nearly always already
+    # running when you make one. Register it now so `create` followed by
+    # `start` works, which is what every caller does and what `make utm` is.
+    register_bundle \
+        || warn "UTM has not picked $NAME up. Open the bundle by hand:  open -a UTM '$BUNDLE'"
+}
+
+# Does UTM itself know about this machine? Not "is there a bundle on disk" --
+# that is a different question, and confusing the two is what made every
+# failure so far look mysterious.
+utm_knows() {
+    [ -x "$UTMCTL" ] || return 1
+    # The name is the THIRD column, and everything after it -- --name accepts
+    # spaces, so $3 alone would miss "Copal x86" and match nothing.
+    "$UTMCTL" list 2>/dev/null | awk -v n="$NAME" '
+        NR > 1 { rest = $0; sub(/^[^ ]+[ ]+[^ ]+[ ]+/, "", rest); if (rest == n) found = 1 }
+        END { exit !found }'
+}
+
+# Make UTM notice a bundle that is already on disk.
+#
+# THE PROBLEM THIS EXISTS FOR. UTM enumerates its documents folder when it
+# launches and does not rescan while it is up. Writing a bundle underneath a
+# running UTM therefore produces a machine that exists, is perfectly valid, and
+# cannot be started -- utmctl answers "Virtual machine not found" for a
+# directory sitting right there. Creating a VM at all is the common way in,
+# since UTM is usually already open when you do it.
+#
+# Opening the BUNDLE registers it. Opening the APP does not: it brings the
+# existing window forward and changes nothing, which is why telling a human to
+# "open UTM" was advice that could not work. Since the remedy is one command
+# and entirely deterministic, do it here rather than print it.
+register_bundle() {
+    utm_knows && return 0
+    [ -d "$BUNDLE" ] || return 1
+    command -v open >/dev/null 2>&1 || return 1
+    info "UTM has not noticed $NAME yet -- registering the bundle..."
+    open -a UTM "$BUNDLE" 2>/dev/null || true
+    # Polled rather than slept at: registration is usually instant, but a cold
+    # UTM launch is not, and a fixed sleep is either too short or wasted.
+    _rb=0
+    while [ "$_rb" -lt 30 ]; do
+        utm_knows && { info "Registered."; return 0; }
+        sleep 0.5
+        _rb=$((_rb + 1))
+    done
+    return 1
 }
 
 do_start() {
     require_bundle
     [ -x "$UTMCTL" ] || die "utmctl not found at $UTMCTL"
+    # Before starting, not after failing: a bundle UTM has never seen is the
+    # single most common reason start does not work, and it is fixable here.
+    register_bundle || true
     info "Starting $NAME..."
     # The failure this almost always is: UTM was ALREADY RUNNING when the
     # bundle was written, and it does not rescan its documents folder while

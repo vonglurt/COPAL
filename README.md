@@ -105,15 +105,15 @@ That builds `build/copal-vmx86.img` if it is not already there, registers it
 with UTM, and starts it. Running it again is safe — it creates a machine only
 when there is not one, and never replaces one.
 
-Two things go wrong at this point, both with one-line fixes:
+One thing to know, and one thing that can still go wrong:
 
-- **`Error: Virtual machine not found`** — UTM was already open when the bundle
-  was written, and it does not rescan its folder while running. Hand it the
-  bundle once, then run `make utm-x86` again:
-
-  ```sh
-  open -a UTM ~/Library/Containers/com.utmapp.UTM/Data/Documents/Copal-x86_64.utm
-  ```
+- **UTM does not rescan its folder while it is running**, so a bundle written
+  underneath it is a machine UTM has never heard of — `utmctl` answers
+  `Virtual machine not found` for a directory sitting right there. Since UTM is
+  nearly always already open when you create a VM, `create` and `start` now
+  register the bundle themselves and wait for UTM to acknowledge it. You should
+  never have to do anything about this. If it ever gives up, it prints the
+  command it would have run.
 
 - **The window takes no keystrokes** — switch to the serial console: the VM
   window's toolbar → **Displays → Serial 1**. On x86_64 that console is
