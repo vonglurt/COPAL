@@ -8780,6 +8780,167 @@ MSG
 }
 
 # --------------------------- stage 10: peripherals, media, disk tools ------
+# yt-dlp, and the one file you must not download.
+#
+# GitHub's release page offers several assets and only one of them runs here:
+#
+#   yt-dlp          a Python zipapp -- a zip of .py files with a
+#                   '#!/usr/bin/env python3' shebang. Interpreted, so it does
+#                   not care what libc this system has. THIS ONE.
+#   yt-dlp_linux    a PyInstaller bundle with a glibc interpreter baked in.
+#                   On Alpine it dies with "not found" -- which is the kernel
+#                   failing to find /lib64/ld-linux-x86-64.so.2 and is one of
+#                   the more misleading error messages in circulation.
+#
+# So: the plain 'yt-dlp' asset, and python3 as a real dependency.
+#
+# WHY NOT JUST apk add yt-dlp. Alpine packages it, and the package is fine for
+# a week. Extractors break whenever a site changes its player, which is often,
+# and the fix arrives as a yt-dlp release long before it arrives as an Alpine
+# one. The zipapp updates itself with 'yt-dlp -U'; the packaged copy refuses to,
+# correctly, because a package manager owns that file. Both are offered because
+# the trade is real: the apk is signed and the curl is not.
+install_ytdlp() {
+    say "yt-dlp"
+    require_network || return 1
+
+    cat <<'MSG'
+
+    Two ways to install it, and the difference matters more than usual.
+
+      c   curl        the zipapp from GitHub into /usr/local/bin. Always the
+                      latest, and 'yt-dlp -U' updates it in place. Not signed
+                      and not tracked by apk. Needs python3.
+      a   apk         Alpine's package: signed, tracked, upgraded with the
+                      rest of the system -- and frozen at whatever version the
+                      release shipped. 'yt-dlp -U' will refuse.
+      n   none        skip
+
+    Extractors break when a site changes its player, which is often. That is
+    the whole argument for 'c'.
+
+MSG
+    if [ "${AUTO:-0}" = 1 ]; then AUTO_DEFAULT=c; fi
+    ask "Choose [c/a/n]:"
+    case "$REPLY" in
+        a|A) try_add yt-dlp || { warn "no yt-dlp package for this architecture"; return 1; } ;;
+        n|N) note "Skipped."; return 0 ;;
+        *)
+            try_add python3 || { warn "python3 is required by the zipapp -- not installing"; return 1; }
+            _url=https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp
+            say "Fetching $_url"
+            mkdir -p /usr/local/bin
+            # To a temporary name, then renamed: a half-downloaded yt-dlp left
+            # in place would shadow nothing and fail confusingly. -L because
+            # the release URL redirects to the CDN.
+            if curl -fL --retry 3 -o /usr/local/bin/.yt-dlp.new "$_url"; then
+                chmod 0755 /usr/local/bin/.yt-dlp.new
+                mv /usr/local/bin/.yt-dlp.new /usr/local/bin/yt-dlp
+                note "installed: $(/usr/local/bin/yt-dlp --version 2>/dev/null || echo 'installed, but it did not report a version')"
+                note "update it later with:  yt-dlp -U"
+            else
+                rm -f /usr/local/bin/.yt-dlp.new
+                warn "download failed -- leaving yt-dlp uninstalled"
+                return 1
+            fi ;;
+    esac
+
+    # Without ffmpeg, yt-dlp can only fetch a stream that is already muxed --
+    # which on YouTube caps you at 720p, because everything above it is served
+    # as separate video and audio that something has to join. It is not
+    # optional in any useful sense.
+    say "ffmpeg -- needed to join separate video and audio streams"
+    add_optional ffmpeg
+
+    write_ytdlp_guide
+}
+
+# The cookies question, written down once so nobody has to find it again.
+#
+# It is the single most common reason a download fails for a logged-in user,
+# and every answer to it is somewhere in a forum thread rather than in the
+# tool's own help.
+write_ytdlp_guide() {
+    mkdir -p /usr/local/share/copal/guides
+    cat > /usr/local/share/copal/guides/yt-dlp.txt <<'GUIDE'
+yt-dlp -- downloads, and the cookies problem
+============================================
+
+The basics
+
+    yt-dlp URL                        best video+audio, muxed by ffmpeg
+    yt-dlp -f best URL                a single already-muxed stream (720p on
+                                      YouTube -- everything above is split)
+    yt-dlp -x --audio-format mp3 URL  audio only
+    yt-dlp -F URL                     list what formats exist
+    yt-dlp -U                         update yt-dlp itself (curl install only)
+
+Cookies: why a download suddenly needs them
+
+Age-gated, members-only, private and region-locked material is served only to
+a logged-in session. So is anything behind a "confirm you are not a bot"
+check. yt-dlp has no login of its own -- it borrows yours, as cookies.
+
+Method 1 -- straight from the browser (start here)
+
+    yt-dlp --cookies-from-browser firefox URL
+    yt-dlp --cookies-from-browser chromium URL
+
+    Firefox is the easy case: the cookie database is plain SQLite and yt-dlp
+    reads it directly.
+
+    Chromium and Chrome encrypt theirs with a key held by the desktop
+    keyring, and yt-dlp can only decrypt it when that keyring is unlocked and
+    reachable -- which means a running desktop session, not an SSH login. If
+    it cannot get the key it says so. CLOSE THE BROWSER FIRST either way:
+    Chromium holds the database locked while it runs.
+
+Method 2 -- a cookies.txt file
+
+    Use when method 1 cannot reach the browser at all: a headless machine, a
+    different machine, or an encrypted store that will not open.
+
+    1. Install a cookie-export extension. "Get cookies.txt LOCALLY" is the
+       one to use -- it does the export in the browser and sends nothing
+       anywhere. Extensions that upload your cookies to a server exist and
+       are exactly as bad an idea as they sound.
+    2. Log in to the site.
+    3. Export. The format must be NETSCAPE HTTP COOKIE FILE -- the first line
+       of the file says so. A JSON export will be rejected.
+    4. Copy the file over and use it:
+
+           yt-dlp --cookies cookies.txt URL
+
+    Treat that file as a password, because it is one: anyone holding it is
+    logged in as you until the session expires. chmod 600 it, and delete it
+    when you are done.
+
+When it still fails
+
+    Update first.                yt-dlp -U
+        Most "this no longer works" is an extractor that was fixed upstream
+        days ago. Try this before anything else.
+
+    Export from a private window.
+        Log in there, export, then CLOSE the window without logging out.
+        A normal-window export shares its session with the browser, and
+        YouTube in particular will rotate the cookie out from under you --
+        the file works once and then does not.
+
+    Check the file really is Netscape format.
+        head -1 cookies.txt   ->   # Netscape HTTP Cookie File
+
+    Rate limiting is not a cookie problem.
+        yt-dlp --limit-rate 1M --sleep-requests 2 URL
+
+Nothing here is stored by Copal and no cookies are kept anywhere by this
+system. The file is yours, it lives where you put it, and deleting it is the
+whole of revoking it.
+GUIDE
+    chmod 0644 /usr/local/share/copal/guides/yt-dlp.txt 2>/dev/null || true
+    note "guide installed -- read it with:  guide   (or Super+Shift+G in i3)"
+}
+
 stage_extras() {
     say "Stage 10: wireless, bluetooth, audio, capture, hex, graphics, disks"
     is_diskless && { warn "run stage 3 first"; return 0; }
@@ -8846,6 +9007,9 @@ MSG
     note "test:                speaker-test -c2 -twav"
 
     # --- packet capture ----------------------------------------------------
+    say "Video and audio downloads"
+    install_ytdlp || warn "yt-dlp not installed -- re-run stage 10 to try again"
+
     say "Network capture"
     # Wireshark's GUI is out of the question here -- Qt plus a live capture
     # on 512 MB. tshark is the same dissectors without the interface.
