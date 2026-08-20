@@ -229,6 +229,33 @@ the password-disabling decision on that instead of on mere existence.
 The guard was always there in intent — the code says *"NOT disabling password
 login -- that would lock you out entirely."* It just asked the wrong question.
 
+### The umask leak — the cause behind both failures
+
+The lockout above had a cause one line long, two stages upstream of where it
+showed up. `admin_sync_password` sets `umask 077` before writing a temporary
+`/etc/shadow`, which is correct, and never restores it — which is not.
+
+`umask` is a property of the shell, and `copal-init.sh` runs every stage in
+**one** shell. So from the middle of stage 1 onward, every directory the
+installer created was `0700`. Stage 3 is what turned that into a broken system:
+`setup-disk` populates the new root with `apk add --root /mnt`, so `/mnt/etc`
+and `/mnt/home` were created `0700`, and after the reboot onto that root:
+
+```
+login: can't change directory to '/home/user': Permission denied
+id: unknown ID 1000
+```
+
+A system that boots, looks perfectly healthy to root, and is unusable as anybody
+else — because `/etc/passwd`, `/etc/group` and `/etc/resolv.conf` are read by
+every name lookup and every DNS query any account makes.
+
+Two changes. The mask is now set, used for the one file that needs it, and put
+back immediately. And `fix_system_dir_modes` checks `/etc`, `/home`, `/usr`,
+`/var` and the rest for world-traversability — on the new root while it is still
+mounted at `/mnt`, and again on the running system in stage 1 — so a machine
+built by a version that had the leak repairs itself instead of staying broken.
+
 ### Still to do
 
 Today `copal-init.sh` is a 9,600-line quoted heredoc inside `copal-prep.sh`.

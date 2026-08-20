@@ -2118,6 +2118,40 @@ own_by_user() {  # <path>...
 # So it is made rather than assumed, with the mode and ownership busybox
 # adduser would have given it and /etc/skel copied in the same way. Silent
 # when there is nothing to do, which is the normal case.
+# System directories that must stay world-readable and world-traversable, and
+# a repair for when they are not.
+#
+# 0755 is not a preference here: /etc/passwd and /etc/group are read by every
+# name lookup any account makes, /etc/resolv.conf by every DNS query, and
+# /etc/profile by every login shell. A /etc at 0700 gives a system that boots,
+# looks perfectly healthy to root, and is unusable as anybody else --
+#
+#     login: can't change directory to '/home/user': Permission denied
+#     id: unknown ID 1000
+#
+# -- which is exactly what a leaked `umask 077` in stage 1 produced, because
+# stage 3 then created the whole new root under it. That leak is fixed at
+# source (see admin_sync_password), but this repairs a machine already built by
+# a version that had it, and costs one stat per directory otherwise.
+#
+# Only the directory itself, never -R: the modes underneath are the packages'
+# business, and /etc/shadow at 0640 must stay that way.
+fix_system_dir_modes() {  # [root prefix, e.g. /mnt]
+    _pfx="${1:-}"
+    _fixed=0
+    for _d in etc home usr var srv opt media mnt run; do
+        [ -d "$_pfx/$_d" ] || continue
+        _m=$(stat -c '%a' "$_pfx/$_d" 2>/dev/null) || continue
+        case "$_m" in
+            *[1357]) continue ;;          # world-traversable already
+        esac
+        warn "$_pfx/$_d is mode $_m -- nothing but root can enter it; setting 0755"
+        chmod 0755 "$_pfx/$_d" 2>/dev/null && _fixed=$((_fixed + 1))
+    done
+    [ "$_fixed" -eq 0 ] || note "repaired $_fixed system directory mode(s)"
+    return 0
+}
+
 # The directories a desktop account is expected to already have.
 #
 # /etc/skel supplies dotfiles, not this: Alpine's skel is nearly empty and none
@@ -3223,10 +3257,36 @@ admin_sync_password() {
         # Write to a temporary file and rename, so an interrupted write can
         # never leave a half-written /etc/shadow -- that file being truncated
         # is an unbootable machine.
+        # RESTORED IMMEDIATELY, and that is the whole point of the dance below.
+        #
+        # umask is a property of the shell, and copal-init.sh runs every stage
+        # in ONE shell -- so `umask 077` here, left set, silently governed every
+        # directory created for the rest of the run. Stage 3 is what turned that
+        # into a broken system: setup-disk populates the new root with
+        # `apk add --root /mnt alpine-base`, so /mnt/etc and /mnt/home were
+        # created 0700 instead of 0755, and after the reboot onto that root no
+        # non-root account could read /etc/passwd, /etc/group or
+        # /etc/resolv.conf, nor enter its own home directory:
+        #
+        #     login: can't change directory to '/home/user': Permission denied
+        #     id: unknown ID 1000
+        #
+        # which is a system that boots, looks fine to root, and is unusable as
+        # anyone else. The lockout that cost a rebuild was this, one line, two
+        # stages upstream of where it showed up.
+        #
+        # The restrictive mask is still wanted, but only for the instant
+        # /etc/shadow.copal is created -- everything after it sets the mode
+        # explicitly anyway. So: set it, create the file, put it back, and only
+        # then look at whether awk succeeded.
+        _oldumask=$(umask)
         umask 077
-        if COPAL_U="$PI_USER" COPAL_H="$_rh" awk -F: -v OFS=: \
+        COPAL_U="$PI_USER" COPAL_H="$_rh" awk -F: -v OFS=: \
                '$1 == ENVIRON["COPAL_U"] { $2 = ENVIRON["COPAL_H"] } { print }' \
                /etc/shadow > /etc/shadow.copal
+        _awk_rc=$?
+        umask "$_oldumask"
+        if [ "$_awk_rc" -eq 0 ]
         then
             chown root:shadow /etc/shadow.copal 2>/dev/null || true
             chmod 640 /etc/shadow.copal 2>/dev/null || true
@@ -3522,6 +3582,9 @@ stage_base_config() {
     # failed is exactly when the privilege grant is most likely to have been
     # skipped, and least likely to be noticed.
     admin_ensure_privileges || warn "'$PI_USER' is not a working administrator -- stage 13 will decline to lock root"
+    # Cheap, and it repairs a root laid down by a version of this script that
+    # leaked a restrictive umask into stage 3.
+    fix_system_dir_modes
     root_handover_notes
 
     # Before the commit, and before anything relies on persistence.
@@ -3712,6 +3775,13 @@ MSG
         # stage reversible by restoring one file.
         BOOTLOADER=none setup-disk -k "$KFLAV" -m sys /mnt
     fi
+
+    # setup-disk populated /mnt with `apk add --root /mnt`, so anything wrong
+    # with the umask at that moment is now baked into the filesystem this
+    # machine is about to boot from. Check it here, while /mnt is still
+    # mounted and a wrong mode is one chmod away rather than a reinstall.
+    fix_system_dir_modes /mnt
+    ensure_user_home /mnt || true
 
     # ---- verify setup-disk actually did the job, rather than hoping --------
     say "Verifying the installed system"
