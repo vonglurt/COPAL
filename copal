@@ -447,16 +447,199 @@ handover() {
     esac
 }
 
+# ------------------------------------------------------------------ verbs ---
+#
+# ONE VOCABULARY. This file used to be a menu with three flags, while the same
+# jobs were also spelled as make targets, as copal-prep.sh options and as
+# utm-vm.sh subcommands -- four ways to say four things, and the Makefile's own
+# comments spend paragraphs warning against exactly that. The verbs below are
+# the answer: `copal` owns the vocabulary, and make and bin/ became aliases
+# that call it rather than a second set of names to keep in step.
+#
+# Bare `copal` is still the menu. That has not changed and should not: the menu
+# is the front door for somebody who does not yet know what they want, and the
+# verbs are for somebody who does.
+#
+# Nothing here reimplements anything. build and cache are copal-prep.sh with
+# the right MODEL, vm is utm-vm.sh, and card is copal-prep.sh with no --image
+# so that its two typed ERASE confirmations happen exactly as they always did.
+
+BUILDDIR="${BUILDDIR:-$HERE/build}"
+UTMRUN="$HERE/utm/utm-vm.sh"
+
+board_keys()  { targets | cut -d'|' -f1 | tr -d ' '; }
+board_valid() { board_keys | grep -qx "$1"; }
+board_list()  {
+    targets | while IFS='|' read -r k l a u; do
+        printf '%-6s %-30s %s\n' "$k" "$(echo "$l" | sed 's/ *$//')" "$a"
+    done
+}
+board_or_die() {
+    [ -n "${1:-}" ] || { say "${R}error:${Z} which board? One of:\n"; board_list >&2; exit 2; }
+    board_valid "$1" || {
+        say "${R}error:${Z} no board called '$1'. One of:\n"; board_list >&2; exit 2; }
+}
+img_for() { printf '%s/copal-%s.img' "$BUILDDIR" "$1"; }
+
+# One board, unattended, the way `make auto` does it -- and now the only copy
+# of that recipe, because make calls this instead of carrying its own.
+#
+# The transcript decides the verdict, not the exit status: the feed has to be
+# unbounded or the build dies on EOF at the first step gate, and an unbounded
+# feed still writing when the child exits makes script(1) report a write error
+# that has nothing to do with whether the build worked.
+build_unattended() {  # <board> <image path> <log>
+    _b="$1"; _out="$2"; _log="$3"
+    mkdir -p "$(dirname "$_log")" "$(dirname "$_out")"
+    yes '' | script -q "$_log" env MODEL="$_b" "$PREP" --fresh --image "$_out" \
+        >/dev/null 2>&1 || true
+    grep -q 'is written and detached' "$_log" && return 0
+    say "${R}error:${Z} $_b did not finish. Tail of $_log:"
+    tail -20 "$_log" | tr -d '\r' | sed 's/^/    /' >&2
+    return 1
+}
+
+cmd_cache() {
+    case "${1:-}" in
+        '') say "${R}error:${Z} which board, or 'all'? ${D}copal cache all${Z} fetches every"
+            say "       architecture -- several gigabytes. Naming it is deliberate."
+            exit 2 ;;
+        all)
+            # Every board, not the five distinct payloads -- because the cache
+            # is keyed by platform and architecture, so zero2, pi4 and pi5 are
+            # one download between them and the repeats cost a checksum each.
+            # Deriving the set here would be a second copy of who-shares-what,
+            # and this way it cannot drift.
+            say "\n${C}==>${Z} Warming the cache for every board. No disk is touched.\n"
+            for _b in $(board_keys); do
+                say "${D}--- $_b${Z}"
+                MODEL="$_b" "$PREP" --cache-only || return 1
+            done
+            say "\n${G}Cache warm.${Z} Every later build reads from ${CACHEDIR:-$BUILDDIR/cache}/.\n"
+            ;;
+        *)  board_or_die "$1"; MODEL="$1" exec "$PREP" --cache-only ;;
+    esac
+}
+
+cmd_build() {
+    [ "${1:-}" = all ] && { shift; cmd_build_all "$@"; return $?; }
+    board_or_die "${1:-}"
+    _b="$1"; shift
+    _out=$(img_for "$_b"); _fresh=""; _auto=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --out) _out="${2:?--out needs a path}"; shift 2 ;;
+            --out=*) _out="${1#--out=}"; shift ;;
+            --fresh) _fresh="--fresh"; shift ;;
+            --auto)  _auto=1; shift ;;
+            *) say "${R}error:${Z} unknown option '$1' for build"; exit 2 ;;
+        esac
+    done
+    if [ "$_auto" -eq 1 ]; then
+        build_unattended "$_b" "$_out" "$BUILDDIR/copal-prep-auto-$_b.log"
+        return $?
+    fi
+    mkdir -p "$(dirname "$_out")"
+    # shellcheck disable=SC2086
+    MODEL="$_b" exec "$PREP" $_fresh --image "$_out"
+}
+
+# Every board, one after another. SERIAL, and not as an oversight.
+#
+# Each build mounts its boot partition at /Volumes/COPALBOOT, because that is
+# the label every Copal disk carries. Two at once and macOS mounts the second
+# as "COPALBOOT 1" while the script writes to the first -- so copal-prep.sh now
+# refuses when the mount is not its own. Running these in parallel therefore
+# does not go faster; it stops. There is nothing to fix here: the label is what
+# makes a card recognisable, and one build at a time is the price.
+cmd_build_all() {
+    say "\n${C}==>${Z} Building every board. ${Y}Serial -- one at a time, by necessity.${Z}"
+    say "${D}    Boot partitions all share a label, so two builds cannot mount at once.${Z}\n"
+    cmd_cache all || return 1
+    _failed=''; _built=0
+    for _b in $(board_keys); do
+        _out=$(img_for "$_b")
+        say "${C}==>${Z} ${B}$_b${Z} -> $_out"
+        if build_unattended "$_b" "$_out" "$BUILDDIR/copal-prep-auto-$_b.log"; then
+            _built=$((_built + 1))
+            say "    ${G}ok${Z}  $(du -h "$_out" 2>/dev/null | cut -f1) on disk"
+        else
+            _failed="$_failed $_b"
+            say "    ${R}failed${Z} -- carrying on with the rest"
+        fi
+    done
+    say "\n${C}==>${Z} Built $_built of $(board_keys | wc -l | tr -d ' ')."
+    [ -z "$_failed" ] || { say "${R}Failed:${Z}$_failed"; return 1; }
+    say "${D}    Write one to a card with:  sudo dd if=$(img_for pc) of=/dev/rdiskN bs=4m${Z}\n"
+}
+
+# The VMs, both of them, from images that must already exist.
+cmd_vm_all() {
+    for _t in aarch64:vm x86_64:vmx86; do
+        _tgt=${_t%%:*}; _mdl=${_t#*:}; _img=$(img_for "$_mdl")
+        [ -f "$_img" ] || { say "${Y}skip${Z} $_tgt -- no $_img yet"; continue; }
+        "$UTMRUN" status --target "$_tgt" >/dev/null 2>&1 \
+            || "$UTMRUN" create --target "$_tgt" --image "$_img" || return 1
+        say "${G}ok${Z}   UTM machine for $_tgt"
+    done
+}
+
+cmd_all() {
+    cmd_build_all || say "${Y}Some boards failed; continuing to the VMs.${Z}"
+    say "\n${C}==>${Z} Registering the UTM machines\n"
+    cmd_vm_all
+    say "\n${G}Done.${Z} ${D}copal vm start --target aarch64${Z}\n"
+}
+
+usage() {
+    say ""
+    say "${B}copal${Z} ${D}-- build Copal Linux: cards, images and virtual machines${Z}"
+    say ""
+    say "${B}  copal${Z}                           the menu: flow chart, boards, briefings"
+    say ""
+    say "${B}  Building${Z}"
+    say "  copal build ${C}BOARD${Z}               write ${D}build/copal-BOARD.img${Z}"
+    say "  copal build ${C}BOARD${Z} --out ${C}P${Z}       write it somewhere else"
+    say "  copal build ${C}BOARD${Z} --fresh       delete it first, build from nothing"
+    say "  copal build ${C}BOARD${Z} --auto        unattended; answers the step gates"
+    say "  copal build all                 every board, serially"
+    say "  copal card ${C}BOARD${Z}                a physical card ${D}(asks twice)${Z}"
+    say ""
+    say "${B}  Payloads${Z}"
+    say "  copal cache ${C}BOARD${Z}               download and verify, touch no disk"
+    say "  copal cache all                 every architecture, once"
+    say ""
+    say "${B}  Virtual machines${Z}"
+    say "  copal vm create --target ${C}T${Z} --image ${C}I${Z}"
+    say "  copal vm ${C}start|stop|status|delete|refresh|ip${Z} --target ${C}T${Z}"
+    say "  ${D}T is aarch64 or x86_64${Z}"
+    say ""
+    say "${B}  Everything${Z}"
+    say "  copal all                       cache, build all, register both VMs"
+    say ""
+    say "${B}  Telling you things${Z}"
+    say "  copal targets                   the board list, one per line"
+    say "  copal check                     what this Mac has and lacks"
+    say "  copal flow                      the flow chart alone"
+    say ""
+    say "  ${D}An image is a raw MBR disk:${Z}"
+    say "  ${D}sudo dd if=build/copal-pc.img of=/dev/rdiskN bs=4m${Z}"
+    say ""
+}
+
 # ------------------------------------------------------------------- main ---
 case "${1:-}" in
-    --flow)    flow; exit 0 ;;
-    --check)   check_host; exit 0 ;;
-    --targets) targets | while IFS='|' read -r k l a u; do
-                   printf '%-6s %-30s %s\n' "$k" "$(echo "$l" | sed 's/ *$//')" "$a"
-               done; exit 0 ;;
-    -h|--help) sed -n '5,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    build)     shift; cmd_build "$@"; exit $? ;;
+    cache)     shift; cmd_cache "$@"; exit $? ;;
+    card)      shift; board_or_die "${1:-}"; MODEL="$1" exec "$PREP" ;;
+    vm)        shift; exec "$UTMRUN" "$@" ;;
+    all)       shift; cmd_all "$@"; exit $? ;;
+    targets|boards|--targets) board_list; exit 0 ;;
+    check|--check)            check_host; exit 0 ;;
+    flow|--flow)              flow; exit 0 ;;
+    help|-h|--help)           usage; exit 0 ;;
     '')        : ;;
-    *)         say "${R}error:${Z} unknown option '$1'. See --help."; exit 1 ;;
+    *)         say "${R}error:${Z} no verb called '$1'. Try ${B}copal help${Z}."; exit 2 ;;
 esac
 
 [ -t 0 ] || { say "${R}error:${Z} this is an interactive menu. Try --flow, --check or --targets."; exit 1; }
