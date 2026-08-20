@@ -304,6 +304,10 @@ random_hostname() {
 CFG_HOSTNAME="${CFG_HOSTNAME:-$(random_hostname)}"
 CFG_TIMEZONE="${CFG_TIMEZONE:-US/Pacific}"
 CFG_IFACE="${CFG_IFACE:-eth0}"
+# Whether this was chosen by the caller or is merely the fallback. The prompt
+# further down asks only when nobody has already answered, so CFG_USER= in the
+# environment stays authoritative and unattended runs never block.
+CFG_USER_EXPLICIT="${CFG_USER:+set}"
 CFG_USER="${CFG_USER:-user}"
 # Mirror selection for setup-apkrepos: -1 first (CDN), -f fastest, -r random.
 CFG_APKREPOS="${CFG_APKREPOS:--1}"
@@ -795,6 +799,80 @@ fetch_bootloader() {  # <payload dir>
        repository on the card would be unreadable to apk."
     info "Repository: apks/$ARCH ($(ls "$_dest/apks/$ARCH"/*.apk 2>/dev/null | wc -l | xargs) packages, $(du -sh "$_dest/apks" | awk '{print $1}'))"
 }
+
+# ------------------------------------------------------------- who uses it ---
+# Asked here, immediately before the download, because this is the last quiet
+# moment: everything after it either transfers several hundred megabytes or
+# erases something, and neither is a good place to stop and think about a name.
+#
+# It is a question rather than a default because the answer ends up in
+# USEROPTS, in copal.conf, in the doas rule, in the home directory path and in
+# the SSH policy -- and changing it afterwards means re-running stage 1 on the
+# target. 'user' remains the answer if Enter is pressed, so an unattended run
+# behaves exactly as it always did.
+#
+# CFG_USER= in the environment skips the question entirely, which is what the
+# Makefile's unattended targets and any scripted caller should use.
+valid_username() {
+    # The character sets are spelled out rather than written as a-z, and that
+    # is not pedantry: inside a bracket expression a RANGE is resolved by the
+    # locale's collation order, and in most locales a-z collates as aAbBcC...
+    # so [!a-z0-9_-] happily accepts 'Paul'. Enumerating the letters makes the
+    # test mean the same thing under every locale this might run in.
+    case "$1" in
+        ''|*[!abcdefghijklmnopqrstuvwxyz0123456789_-]*) return 1 ;;
+        [!abcdefghijklmnopqrstuvwxyz]*)                 return 1 ;;
+    esac
+    [ "${#1}" -le 32 ] || return 1
+    # Names the system already means something by. adduser would refuse some of
+    # these and silently collide with others.
+    case "$1" in
+        root|daemon|bin|sys|adm|lp|sync|shutdown|halt|mail|news|uucp|operator|man|postmaster|cron|ftp|sshd|at|squid|xfs|games|cyrus|vpopmail|ntp|smmsp|guest|nobody|utmp|wheel)
+            return 1 ;;
+    esac
+    return 0
+}
+
+if [ "$REFRESH" -eq 0 ] && [ -z "${CFG_USER_EXPLICIT:-}" ] && [ -t 0 ]; then
+    printf '\n\033[1m─── Who will use this machine? ───\033[0m\n' >&2
+    cat >&2 <<WHO
+
+    Copal creates one ordinary account and hands root over to it at the end,
+    so this name is the login you will actually use. It also becomes the home
+    directory, the owner of the desktop configuration, the account the SSH key
+    is authorised for, and the name in the doas rule.
+
+    Lower-case letters, digits, '-' and '_'; must start with a letter.
+
+WHO
+    while :; do
+        printf '    Username [%s]: ' "$CFG_USER" >&2
+        read -r _reply < /dev/tty || _reply=""
+        [ -n "$_reply" ] || break                       # Enter keeps the default
+        if valid_username "$_reply"; then
+            CFG_USER="$_reply"; break
+        fi
+        printf '\033[33m    Not a usable username. Lower-case, starts with a letter, and not one\n    the system already reserves.\033[0m\n' >&2
+    done
+    info "Admin account: $CFG_USER"
+
+    # The git identity is a PROPOSAL taken from this Mac's own git config, and
+    # it is offered rather than assumed for the same reason: whoever writes the
+    # card is usually but not always whoever will commit from the machine.
+    # Declining leaves the field empty and stage 1 asks on the target instead.
+    if [ -n "${CFG_GIT_NAME}${CFG_GIT_EMAIL}" ]; then
+        printf '\n    Git identity for commits made on the machine, taken from this Mac:\n' >&2
+        printf '        %s <%s>\n' "${CFG_GIT_NAME:-(no name)}" "${CFG_GIT_EMAIL:-no email}" >&2
+        printf '    Offer that as the default on the target? [Y/n]: ' >&2
+        read -r _reply < /dev/tty || _reply=""
+        case "$_reply" in
+            n|N|no|NO)
+                CFG_GIT_NAME=""; CFG_GIT_EMAIL=""
+                info "Git identity left empty -- stage 1 will ask on the target" ;;
+            *) : ;;
+        esac
+    fi
+fi
 
 # ---------------------------------------------------------------- payload ---
 # --refresh rewrites only the small generated files -- answers.txt,

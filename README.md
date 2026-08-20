@@ -127,6 +127,26 @@ fault. To test connectivity before stage 1, from the guest console:
 ip link set eth0 up && udhcpc -i eth0 && ping -c3 dl-cdn.alpinelinux.org
 ```
 
+## Who the machine is for
+
+`copal-prep.sh` asks for the admin username immediately before the download —
+the last quiet moment before it either transfers several hundred megabytes or
+erases something. It is a question rather than a default because the answer
+lands in `USEROPTS`, `copal.conf`, the `doas` rule, the home directory path and
+the SSH policy, and changing it afterwards means re-running stage 1 on the
+target.
+
+- Press Enter and it stays **`user`**, exactly as before.
+- `CFG_USER=alice` in the environment skips the question — which is what the
+  Makefile's unattended targets and any scripted caller should use.
+- Non-interactive runs never block; the prompt is guarded on a tty.
+
+The git identity is offered the same way. It is read from *this Mac's* git
+config and proposed as the default the target will suggest in stage 1 — but it
+is now shown and confirmed rather than baked in silently, and declining leaves
+it empty so the target asks instead. Whoever writes the card is usually, but
+not always, whoever will commit from the machine it boots.
+
 ## Consoles
 
 Every UTM target gets **both** a graphical display and a serial console, on
