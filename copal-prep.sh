@@ -1777,12 +1777,13 @@ else
     warn "Run ./fetch-minivmac.sh first to put one there."
 fi
 
-# Candidates in preference order. work/ holds the raw dump; minivmac/ holds the
-# copy fetch-minivmac.sh installs, which may be a placeholder of zero length --
-# stage_rom rejects that rather than staging an empty file that would satisfy
-# every 'is the ROM there' test and then fail inside the emulator.
+# Candidates in preference order. minivmac/ holds the copy fetch-minivmac.sh
+# installs, which may be a placeholder of zero length -- stage_rom rejects that
+# rather than staging an empty file that would satisfy every 'is the ROM there'
+# test and then fail inside the emulator. The other two are raw dumps: the
+# cache directory, and the top-level work/ it used to be called.
 MVM_ROM_DONE=0
-for _cand in "$MVM_LOCAL/minivmac/vMac.ROM" "$MVM_LOCAL/work/vMac.ROM"; do
+for _cand in "$MVM_LOCAL/minivmac/vMac.ROM" "$CACHEDIR/vMac.ROM" "$MVM_LOCAL/work/vMac.ROM"; do
     [ -s "$_cand" ] || continue
     if stage_rom "$_cand" "$MNT/minivmac/vMac.ROM"; then MVM_ROM_DONE=1; break; fi
     warn "$_cand does not verify as a Mac ROM -- not staging it"

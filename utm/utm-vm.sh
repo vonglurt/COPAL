@@ -26,11 +26,11 @@
 # against the UTM 4.7.4 binary rather than guessed.
 #
 # Usage:
-#   utm/utm-vm.sh create  --target aarch64 --image copal-vm.img
+#   utm/utm-vm.sh create  --target aarch64 --image build/copal-vm.img
 #   utm/utm-vm.sh start   --target aarch64
 #   utm/utm-vm.sh status  --target aarch64
 #   utm/utm-vm.sh stop    --target aarch64
-#   utm/utm-vm.sh refresh --target aarch64 --image copal-vm.img
+#   utm/utm-vm.sh refresh --target aarch64 --image build/copal-vm.img
 #   utm/utm-vm.sh delete  --target aarch64
 #   utm/utm-vm.sh config  --target x86_64        # print the plist, write nothing
 #   utm/utm-vm.sh progress --target x86_64       # how far the install has got

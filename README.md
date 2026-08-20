@@ -868,11 +868,16 @@ WHAT IS IN THIS FOLDER
   Left loose by older builds                --   nothing here
   Generated config -- identity              --   nothing here
   macOS metadata                           12K   make clean
+  minivmac/ -- emulator working set         --   nothing here
 
   Everything above                        2.8G   make distclean
 
   Registered UTM machines live in UTM's own container, not here, and
   no make target touches them: utm/utm-vm.sh delete --target aarch64
+
+  minivmac/ is left alone on purpose. fetch-minivmac.sh --rom copies in a
+  ROM dumped from a Macintosh Plus, and that is not re-downloadable. Remove
+  it by hand if you mean to.
 ```
 
 **The images are sparse.** A 64g image reports 64 GB to `ls -lh` and occupies
@@ -923,6 +928,11 @@ The *Left loose by older builds* row exists because a working copy made before
 `build/` did will still have images and transcripts in the root and a top-level
 `work/`. `make clean` removes those too, so there is never a half-cleaned folder
 holding one layout's leftovers.
+
+`minivmac/` is the one generated directory no target removes, and that is
+deliberate: `fetch-minivmac.sh --rom` copies in a ROM dumped from a Macintosh
+Plus you own, and there is nowhere to re-download that from. It is reported so
+you know it is there, and left for you to delete by hand.
 
 ---
 

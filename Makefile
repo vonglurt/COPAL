@@ -374,10 +374,14 @@ space:
 	$(call size_row,Left loose by older builds,ls -d $(LEGACY) work 2>/dev/null,make clean)
 	$(call size_row,Generated config -- identity,ls -d $(SECRETS) 2>/dev/null,make clean)
 	$(call size_row,macOS metadata,ls -d $(CRUFT) 2>/dev/null,make clean)
+	$(call size_row,minivmac/ -- emulator working set,ls -d minivmac 2>/dev/null,nothing -- see below)
 	@printf '\n'
 	$(call size_row,Everything above,ls -d $(BUILDDIR) $(LEGACY) work $(SECRETS) $(CRUFT) 2>/dev/null,make distclean)
 	@printf '\n  \033[2m%s\033[0m\n' 'Registered UTM machines live in UTM'"'"'s own container, not here, and'
-	@printf '  \033[2m%s\033[0m\n\n' 'no make target touches them: utm/utm-vm.sh delete --target aarch64'
+	@printf '  \033[2m%s\033[0m\n' 'no make target touches them: utm/utm-vm.sh delete --target aarch64'
+	@printf '\n  \033[2m%s\033[0m\n' 'minivmac/ is left alone on purpose. fetch-minivmac.sh --rom copies in a'
+	@printf '  \033[2m%s\033[0m\n' 'ROM dumped from a Macintosh Plus, and that is not re-downloadable. Remove'
+	@printf '  \033[2m%s\033[0m\n\n' 'it by hand if you mean to.'
 
 # work/ is in the removal list because that is where the cache used to live,
 # at the top level. A working copy from before the move keeps it, and leaving
