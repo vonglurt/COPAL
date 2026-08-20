@@ -67,7 +67,8 @@ model_of = $(patsubst pizero%,zero%,$(1))
 
 .DEFAULT_GOAL := help
 .PHONY: help menu flow targets boards configure require-tools vm graphical check \
-        fresh auto image refresh utm utm-x86 lint space clean distclean
+        fresh auto image refresh utm utm-x86 lint space clean distclean \
+        all cache build-all
 
 help:
 	@printf '\nCopal Linux -- make targets\n\n'
@@ -109,6 +110,11 @@ help:
 	@printf '                    \033[36mpc pc32\033[0m                   x86_64 / x86 (UEFI)\n'
 	@printf '                    \033[36mvm\033[0m                        aarch64 (QEMU/UTM)\n'
 	@printf '                  pizero2 and pizero work too. e.g. \033[1mmake sd-zero2\033[0m\n'
+	@printf '\n'
+	@printf '\033[1m  Everything at once\033[0m\n'
+	@printf '  make cache      download every architecture'"'"'s payload, build nothing\n'
+	@printf '  make all        cache, build all %s boards, register both UTM machines\n' "$$(./copal targets | wc -l | tr -d ' ')"
+	@printf '                  \033[33mSerial by necessity -- make -j cannot help here.\033[0m\n'
 	@printf '\n'
 	@printf '\033[1m  Housekeeping\033[0m\n'
 	@printf '  make lint       sh -n on copal-prep.sh and on the copal-init.sh it generates\n'
@@ -265,13 +271,7 @@ fresh: | require-tools $(BUILDDIR)
 # stay unset. The image boots regardless -- EDK2 finds BOOTAA64.EFI by scanning
 # the FAT filesystem -- but it is not byte-identical to an attended build.
 auto: | require-tools $(BUILDDIR)
-	@printf '\033[36m==>\033[0m Unattended build of $(IMG). Step gates answered automatically.\n'
-	@printf '    Transcript: $(AUTOLOG)\n'
-	@yes '' | script -q $(AUTOLOG) env MODEL=$(MODEL) $(PREP) --fresh --image $(IMG) \
-	    >/dev/null 2>&1 || true
-	@grep -q 'is written and detached' $(AUTOLOG) \
-	    || { printf '\033[31merror:\033[0m the build did not finish. Tail of $(AUTOLOG):\n'; \
-	         tail -20 $(AUTOLOG) | tr -d '\r' | sed 's/^/    /'; exit 1; }
+	@./copal build $(MODEL) --auto --out $(IMG)
 	@printf '\033[36m==>\033[0m Built. Boot it with: make vm   (or: make check)\n'
 
 refresh: | require-tools
@@ -322,6 +322,29 @@ utm-x86:
 	@$(UTMRUN) start --target x86_64
 	@printf '\033[36m==>\033[0m Started. Emulated by TCG, so expect it to be slow.\n'
 	@printf '    \033[2m%s\033[0m\n' 'Serial console is on ttyS0 here, not ttyAMA0.'
+
+# --------------------------------------------------- everything at once ---
+#
+# Thin, and deliberately so. `./copal all` is where this lives now -- the
+# caching, the nine serial builds, the two UTM machines -- because the same job
+# spelled once as a make target and again as a shell verb is two things to keep
+# in step. make keeps the name people already type; copal does the work.
+#
+# .NOTPARALLEL is not decoration. Every board's boot partition carries the same
+# label, so two builds cannot mount at once and copal-prep.sh now refuses when
+# the mount point is not its own. `make -j all` would not be faster; it would
+# stop partway with a confusing error, so parallelism is disabled here rather
+# than diagnosed later.
+.NOTPARALLEL: all cache build-all
+
+all:
+	@./copal all
+
+cache:
+	@./copal cache all
+
+build-all:
+	@./copal build all
 
 # ------------------------------------------------------- cards and boards ---
 

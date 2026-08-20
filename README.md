@@ -219,6 +219,51 @@ build's disk — but the fix is to let the first build finish.
 
 ---
 
+## copal — the one command
+
+`./copal` on its own is still the menu. With a verb it is the whole toolchain,
+and every other surface — the make targets, `bin/`, `utm-vm.sh` — is an alias
+that calls it.
+
+```sh
+copal build pi4                 # -> build/copal-pi4.img
+copal build pc --out /tmp/x.img # anywhere you like
+copal build zero2 --auto        # unattended: answers its own step gates
+copal build all                 # every board, serially
+copal card zero2                # a physical card (asks which disk, twice)
+
+copal cache pi4                 # fetch and verify the payload, touch no disk
+copal cache all                 # every architecture, so later builds are offline
+
+copal vm create --target aarch64 --image build/copal-vm.img
+copal vm start --target aarch64 # also stop, status, delete, refresh, ip
+
+copal all                       # cache, build every board, register both VMs
+copal targets | copal check | copal flow | copal help
+```
+
+**The images are raw MBR disks — dd them straight to a card:**
+
+```sh
+copal build pc
+sudo dd if=build/copal-pc.img of=/dev/rdisk4 bs=4m
+```
+
+They are sparse: 64 GB apparent, about 430 MB actually on disk.
+
+**Caching is per architecture, not per board.** `zero2`, `pi4` and `pi5` share
+one download; the nine boards need six payloads and three bootloader ISOs, about
+2.9 GB in total. `copal cache all` fetches the lot, verifying each published
+SHA256, and writes to no disk — after which every build is offline.
+
+**`copal all` and `copal build all` are serial, by necessity.** Every Copal disk
+labels its boot partition `COPALBOOT`, so two builds cannot have theirs mounted
+at once — `copal-prep.sh` refuses rather than writing into the other build's
+disk. `make -j` cannot help here, and `make all` disables it rather than letting
+you find out the hard way.
+
+---
+
 ## The idea
 
 The original Copal wrote SD cards from a Mac. That worked, but every change to
