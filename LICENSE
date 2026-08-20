@@ -1,0 +1,105 @@
+Copal Linux
+The damn tasty Raspberry Pi Zero distro. Full installer.
+
+SPDX-License-Identifier: MIT
+
+MIT License
+
+Copyright (c) 2026 paulr@sdf.org
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+--------------------------------------------------------------------------------
+SCOPE
+
+The MIT licence above covers the work original to this repository -- that is,
+Copal Linux itself: copal-prep.sh, fetch-minivmac.sh, the scripts under
+minivmac/, everything those generate (copal-init.sh and the helpers it installs
+as copal, copal-menu, copal-center, copal-install, copal-guide and
+copal-splash, plus the application catalogue and the guides), README.md and
+lab-report.md.
+
+"Copal Linux" is a name for this installer and its generated system.
+
+RELATIONSHIP TO ALPINE LINUX -- Copal is an AGGREGATION of Alpine Linux, not a
+derivative work of it. The distinction is the whole reason this section exists:
+
+  * Copal contains no Alpine source code. Every script here is original work,
+    and the licence above is a grant over that work alone.
+  * copal-prep.sh DOWNLOADS stock Alpine from Alpine's own mirrors, verifies its
+    published SHA256, and copies it onto a card unmodified. copal-init.sh then
+    calls Alpine's own tools -- setup-alpine, setup-disk, apk, lbu -- rather
+    than reimplementing them.
+  * What ends up on the card is therefore an aggregate: Alpine, under Alpine's
+    licences, plus Copal's scripts, under the MIT licence above. Each part keeps
+    its own terms. Putting two works on one filesystem does not merge their
+    licences, and nothing here attempts to.
+
+Copal is NOT a fork of Alpine Linux and is not affiliated with or endorsed by
+the Alpine Linux project.
+
+ALPINE IS NOT MIT-LICENSED, and this must not be misread as claiming otherwise.
+Alpine Linux is a distribution aggregating thousands of packages under many
+licences. Among the pieces Copal relies on directly:
+
+  Linux kernel        GPL-2.0-only (with the syscall exception)
+  BusyBox             GPL-2.0-only
+  apk-tools           GPL-2.0-only
+  alpine-conf         MIT          (setup-alpine, setup-disk, setup-xorg-base)
+  musl libc           MIT
+  OpenRC              BSD-2-Clause
+
+The MIT licence above CANNOT and does not relicense any of that. In particular,
+no GPL-licensed component becomes MIT by being downloaded, installed or invoked
+by an MIT-licensed script -- and the applications Copal's catalogue installs
+(GIMP, Wireshark, GNU Radio, GHC and some three hundred others) each remain
+under their own terms, which the catalogue never alters.
+
+If you redistribute a card or image written by Copal, you are redistributing
+those components, and their licences -- including the GPL's source-offer
+obligations -- apply to you for those parts.
+
+It does NOT and cannot cover the third-party material stored alongside them.
+Each of these remains under its own terms, and nothing here relicenses any of
+it:
+
+  work/alpine-rpi-*            Alpine Linux, and the packages inside it, under
+  work/alpine-netboot-*        their respective licences (mostly GPL, MIT, BSD).
+  work/alpine-virt-*.iso       See https://alpinelinux.org/
+                               The virt ISO is downloaded on the x86 path for one
+                               file: efi/boot/bootx64.efi, Alpine's build of GRUB
+                               (GPL-3.0-or-later), copied to the card unmodified.
+
+  minivmac/minivmac-*.src.tgz  Mini vMac, (c) Paul C. Pratt and contributors,
+  minivmac/copyroms-*.zip      GPL-2.0. See https://www.gryphel.com/c/minivmac/
+  minivmac/blanks-*.zip
+
+  minivmac/System_7.0.1.smi.bin  Apple Macintosh system software.
+  minivmac/macOS755.dsk*         Copyright Apple Inc. Not redistributable.
+
+  minivmac/vMac.ROM            Macintosh Plus ROM. Copyright Apple Inc.
+                               Never distributed by Apple, and not
+                               redistributable. Present here only as a dump of
+                               hardware owned by the repository's owner.
+
+Publishing this repository — pushing it to a public remote, for instance —
+would distribute the Apple material above, which the MIT licence does not
+permit and cannot authorise. If this repository is ever to be made public, the
+Apple files must be removed from the working tree AND from git history first,
+since history retains every committed blob.

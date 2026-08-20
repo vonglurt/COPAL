@@ -1,0 +1,45 @@
+# copal-alpine-linux tracks NO binaries. This is the opposite of the policy in
+# the original arm-pi-zero repository, which vendored the Alpine payload and the
+# Mini vMac working set on purpose. That repository could never be published:
+# minivmac/macOS755.dsk.zip was 894 MB, past GitHub's 100 MB per-file limit, and
+# the Macintosh Plus ROM beside it is copyrighted Apple material.
+#
+# Nothing is lost. copal-prep.sh downloads the Alpine payload and verifies its
+# published SHA256; fetch-minivmac.sh assembles the Mini vMac set on demand. The
+# binaries were always a convenience, never a dependency.
+
+# Downloads and scratch
+work/
+cache/
+
+# Disk images, firmware, and anything a target boots from
+*.img
+*.qcow2
+*.raw
+*.dmg
+*.iso
+*.fd
+*.utm/
+
+# Payloads and packages
+*.tar.gz
+*.tgz
+*.zip
+*.apk
+
+# Emulator media -- ROMs and disk images are not ours to redistribute
+*.ROM
+*.rom
+*.dsk
+*.smi.bin
+
+# Logs and transcripts
+*.log
+run-log-*.txt
+
+# macOS metadata
+.DS_Store
+._*
+.Spotlight-V100
+.fseventsd
+.Trashes
