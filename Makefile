@@ -31,12 +31,26 @@
 BUILDDIR ?= build
 CACHEDIR ?= $(BUILDDIR)/cache
 
-IMG      ?= $(BUILDDIR)/copal-vm.img
+# MODEL FIRST, AND EVERY GENERATED NAME DERIVED FROM IT.
+#
+# These used to be constants, and the aarch64 name was the constant -- so
+# `make fresh MODEL=vmx86` built an x86_64 image and wrote it to
+# copal-vm.img, on top of the aarch64 one, with a name saying the opposite of
+# what it held. `make auto MODEL=vmx86` did the same to the transcript. The
+# only reason it was survivable is that nobody ran the two models on the same
+# afternoon; the moment you want both machines at once it is a silent
+# clobber, and the evidence it had already happened was sitting in build/ as
+# a hand-made copal-prep-auto-x86.log beside the real one.
+#
+# Deriving them means the filename states the mode, two models never collide,
+# and the defaults are unchanged for MODEL=vm -- copal-vm.img and
+# copal-vm-check.log are exactly what they were.
 MODEL    ?= vm
+IMG      ?= $(BUILDDIR)/copal-$(MODEL).img
+LOG      ?= $(BUILDDIR)/copal-$(MODEL)-check.log
+AUTOLOG  ?= $(BUILDDIR)/copal-prep-auto-$(MODEL).log
 MEM      ?= 2048
 CPUS     ?= 2
-LOG      ?= $(BUILDDIR)/copal-vm-check.log
-AUTOLOG  ?= $(BUILDDIR)/copal-prep-auto.log
 
 PREP     := ./copal-prep.sh
 VMRUN    := ./copal-vm.sh
@@ -282,12 +296,17 @@ refresh: | require-tools
 # way, and until now it was the only boot route with no target behind it.
 
 UTMRUN  := ./utm/utm-vm.sh
+# The same name `IMG` derives to at MODEL=vmx86, and deliberately spelled the
+# same way: if these two ever disagree, utm-x86 builds one file and every
+# other target reads another.
 X86IMG  ?= $(BUILDDIR)/copal-vmx86.img
 
-# The x86_64 counterpart of $(IMG). Same rule, different MODEL: vmx86 is what
-# sets ARCH=x86_64 with VM=1, and what ./copal offers as target 9.
-$(X86IMG): | require-tools $(BUILDDIR)
-	MODEL=vmx86 $(PREP) --image $(X86IMG)
+# No rule of its own for $(X86IMG), and that is the point of deriving IMG from
+# MODEL. It used to have one, and once IMG became $(BUILDDIR)/copal-$(MODEL).img
+# the two spelled the same filename whenever MODEL=vmx86 -- two rules for one
+# target, which make resolves by warning and silently keeping one. Recursing
+# with MODEL overridden uses the single image rule instead, the same way
+# distclean recurses into clean.
 
 utm: image
 	@$(UTMRUN) status --target aarch64 >/dev/null 2>&1 \
@@ -296,7 +315,8 @@ utm: image
 	@printf '\033[36m==>\033[0m Started. Find its address with: %s ip --target aarch64\n' '$(UTMRUN)'
 	@printf '    \033[2m%s\033[0m\n' 'Serial console: the VM window toolbar -> Displays -> Serial 1'
 
-utm-x86: $(X86IMG)
+utm-x86:
+	@$(MAKE) --no-print-directory image MODEL=vmx86
 	@$(UTMRUN) status --target x86_64 >/dev/null 2>&1 \
 	    || $(UTMRUN) create --target x86_64 --image $(X86IMG)
 	@$(UTMRUN) start --target x86_64
