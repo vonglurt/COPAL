@@ -2040,6 +2040,42 @@ own_by_user() {  # <path>...
 # So it is made rather than assumed, with the mode and ownership busybox
 # adduser would have given it and /etc/skel copied in the same way. Silent
 # when there is nothing to do, which is the normal case.
+# The directories a desktop account is expected to already have.
+#
+# /etc/skel supplies dotfiles, not this: Alpine's skel is nearly empty and none
+# of the XDG directories are in it. Without them pcmanfm opens on a blank home,
+# anything honouring XDG_CONFIG_HOME creates it as whoever runs first -- which
+# during an install is root -- and stage 6 has to invent ~/.ssh itself with
+# `mkdir -p`, which is how a root-owned home got created on the way past in the
+# first place.
+#
+# Made with the right owner from the start, rather than made by whatever
+# happens to touch them and repaired afterwards.
+ensure_user_dirs() {  # [root prefix]
+    _pfx="${1:-}"
+    _uh=$(user_home) || return 1
+    [ -n "$_uh" ] || return 1
+    [ -d "$_pfx$_uh" ] || return 1
+    _uid=$(id -u "$PI_USER" 2>/dev/null) || return 1
+    _gid=$(id -g "$PI_USER" 2>/dev/null) || return 1
+
+    # .ssh is 0700 because sshd refuses to read a key out of anything looser.
+    # The rest are 0755: a home that other accounts cannot traverse breaks
+    # nothing here and surprises people later.
+    for _d in .config .cache .local .local/share .local/bin \
+              Desktop Documents Downloads Pictures Music Videos; do
+        [ -d "$_pfx$_uh/$_d" ] || mkdir -p "$_pfx$_uh/$_d" 2>/dev/null || continue
+        chmod 0755 "$_pfx$_uh/$_d" 2>/dev/null || true
+    done
+    [ -d "$_pfx$_uh/.ssh" ] || mkdir -p "$_pfx$_uh/.ssh" 2>/dev/null || true
+    chmod 0700 "$_pfx$_uh/.ssh" 2>/dev/null || true
+    [ -f "$_pfx$_uh/.ssh/authorized_keys" ] \
+        && chmod 0600 "$_pfx$_uh/.ssh/authorized_keys" 2>/dev/null || true
+
+    chown -R "$_uid:$_gid" "$_pfx$_uh" 2>/dev/null || true
+    return 0
+}
+
 ensure_user_home() {  # [root prefix, e.g. /mnt]
     _pfx="${1:-}"
     id "$PI_USER" >/dev/null 2>&1 || return 1
@@ -2093,7 +2129,7 @@ ensure_user_home() {  # [root prefix, e.g. /mnt]
         if [ -n "$_now" ] && [ "$_now" = "$_uid" ]; then
             _hm=$(stat -c '%a' "$_pfx$_uh" 2>/dev/null || echo "")
             case "$_hm" in
-                *[1357]) return 0 ;;   # owned correctly and enterable: done
+                *[1357]) ensure_user_dirs "$_pfx" || true; return 0 ;;
             esac
             warn "$_pfx$_uh is mode $_hm -- its owner cannot enter it; fixing"
         elif [ -z "$_now" ]; then
@@ -2104,6 +2140,7 @@ ensure_user_home() {  # [root prefix, e.g. /mnt]
         chown -R "$_uid:$_gid" "$_pfx$_uh" 2>/dev/null || true
         chmod 0755 "$_pfx$_uh" 2>/dev/null || true
         note "now owned by $PI_USER ($_uid:$_gid), mode 0755"
+        ensure_user_dirs "$_pfx" || true
         return 0
     fi
 
@@ -2119,6 +2156,7 @@ ensure_user_home() {  # [root prefix, e.g. /mnt]
     else
         warn "made, but the uid for $PI_USER is unknown -- it is root-owned"
     fi
+    ensure_user_dirs "$_pfx" || true
     return 0
 }
 
@@ -3035,6 +3073,39 @@ DOASCONF
 # plaintext is ever written, read back or logged. Copying the hash rather than
 # re-running passwd also means this needs no prompt at all, which is what makes
 # the automatic install able to finish the job.
+# Making the account an administrator, kept separate from giving it a password.
+#
+# These used to live at the end of admin_sync_password, which has three early
+# returns above them -- a missing account, an unusable root hash, a shadow file
+# it could not rewrite. Any one of those left the user with no wheel membership,
+# no doas rule and no sudo shim, and said nothing about it, because the function
+# had already reported the password problem and moved on. Stage 13 would then
+# refuse to lock root, correctly, for a reason that looked unrelated to the
+# password failure that actually caused it.
+#
+# Whether the account can log in and whether it can become root are two
+# different questions. Failing the first is no reason to skip the second.
+admin_ensure_privileges() {
+    id "$PI_USER" >/dev/null 2>&1 || { warn "user '$PI_USER' does not exist -- cannot grant it anything"; return 1; }
+
+    # setup-alpine's USEROPTS carries -a, which is what is supposed to make the
+    # account an administrator: it installs doas and puts the user in wheel.
+    # Verified rather than assumed, because locking root at all depends on it.
+    if in_wheel "$PI_USER"; then
+        note "'$PI_USER' is in wheel"
+    else
+        warn "'$PI_USER' is not in the wheel group -- adding it"
+        adduser "$PI_USER" wheel 2>/dev/null || warn "adduser failed"
+        in_wheel "$PI_USER" && note "'$PI_USER' is now in wheel" \
+            || warn "'$PI_USER' STILL not in wheel -- doas will not reach it"
+    fi
+
+    admin_ensure_doas || warn "doas is not usable yet -- stage 13 will refuse to lock root"
+    admin_grant_sudo
+    admin_fix_desktop_groups
+    return 0
+}
+
 admin_sync_password() {
     say "Giving '$PI_USER' the same password as root"
 
@@ -3091,18 +3162,6 @@ admin_sync_password() {
         fi
     fi
 
-    # setup-alpine's USEROPTS carries -a, which is what makes the account an
-    # administrator: it installs doas and puts the user in wheel. Both are
-    # verified rather than assumed, because everything below -- and locking
-    # root at all -- depends on them.
-    if ! in_wheel "$PI_USER"; then
-        warn "'$PI_USER' is not in the wheel group -- adding it"
-        adduser "$PI_USER" wheel 2>/dev/null || warn "adduser failed"
-    fi
-    admin_ensure_doas || warn "doas is not usable yet -- stage 13 will refuse to lock root"
-
-    admin_grant_sudo
-    admin_fix_desktop_groups
 
     note "login    : $PI_USER  (password: the one you gave root)"
     note "become root: doas -s      run one command as root: doas <cmd>"
@@ -3381,6 +3440,10 @@ stage_base_config() {
 
     # Before the commit, so the synced password goes into the same apkovl.
     admin_sync_password || warn "'$PI_USER' may not be able to log in -- check 'passwd $PI_USER'"
+    # Unconditional, and deliberately after the || above: a password sync that
+    # failed is exactly when the privilege grant is most likely to have been
+    # skipped, and least likely to be noticed.
+    admin_ensure_privileges || warn "'$PI_USER' is not a working administrator -- stage 13 will decline to lock root"
     root_handover_notes
 
     # Before the commit, and before anything relies on persistence.
