@@ -124,12 +124,7 @@ target_use()   { targets | sed -n "${1}p" | cut -d'|' -f4; }
 # MODEL=vm implies aarch64, and the VM GRUB config hardcodes console=ttyAMA0,
 # which is the ARM PL011 and does not exist on x86. Saying so here is better
 # than letting someone build a VM that boots to a console nobody can see.
-target_ready() {
-    case "$1" in
-        vmx86) return 1 ;;
-        *)     return 0 ;;
-    esac
-}
+target_ready() { return 0; }
 
 menu() {
     say ""
@@ -285,28 +280,31 @@ detail() {
         ;;
     vmx86)
         say ""
-        say "  ${R}This target is not built yet.${Z}"
+        say "  ${C}Equipment you need${Z}"
+        say "    - This Mac, and UTM. That is the entire list."
         say ""
-        say "  Two things stand between here and there, both small:"
+        say "  ${C}CPU${Z}"
+        say "    x86_64, ${B}emulated${Z} by QEMU's TCG translator. Apple Silicon"
+        say "    cannot virtualise x86, so every instruction is translated --"
+        say "    perhaps 5-20x slower than the aarch64 VM. Usable, not pleasant."
         say ""
-        say "    1. ${B}MODEL=vm implies aarch64.${Z} A VM target that is x86_64"
-        say "       needs VM=1 and ARCH=x86_64 to coexist, which they currently"
-        say "       cannot ${D}(copal-prep.sh:438)${Z}."
-        say ""
-        say "    2. ${B}The VM boot config hardcodes console=ttyAMA0${Z}"
-        say "       ${D}(copal-prep.sh:1478)${Z}. That is QEMU's PL011, an ARM"
-        say "       device. On x86 the serial port is the 8250 at ttyS0, so this"
-        say "       would boot to a console nobody can see."
-        say ""
-        say "  Everything else already works: the download, the partitioning and"
-        say "  the payload copy are shared with the PC target, which is x86_64"
-        say "  and builds today."
+        say "  ${C}Minimum requirements${Z}"
+        say "    - A 64 GB image ${D}(default, sparse -- ~550 MB to start)${Z}"
+        say "    - 6 GB RAM allotted to the VM"
+        say "    - Patience. Stage 7 and stage 9 compile things."
         say ""
         say "  ${C}Expected use case${Z}"
-        say "    Verifying the PC code path without owning a spare PC. On Apple"
-        say "    Silicon this is QEMU TCG ${B}emulation${Z}, not virtualisation --"
-        say "    it will be slow. Slow is still much faster than finding a PC."
-        ;;
+        say "    Verifying the ${B}pc${Z} target without owning a PC. It boots the"
+        say "    same x86_64 payload, the same GRUB from the same ISO and the"
+        say "    same copal-init.sh that an ordinary UEFI laptop would -- so a"
+        say "    change that breaks the PC path breaks here first, on a machine"
+        say "    that costs nothing to rebuild."
+        say ""
+        say "    The one thing it does not share with a real PC is the firmware."
+        say "    UTM supplies OVMF; your laptop supplies whatever its vendor"
+        say "    shipped, and that is where the remaining surprises live."
+        say ""
+        say "  ${Y}Time${Z}  ~5 min to build, then slow to install"
     esac
     say ""
     rule

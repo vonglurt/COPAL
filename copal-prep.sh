@@ -403,13 +403,16 @@ if [ -z "$MODEL" ] && [ -z "${ARCH:-}" ] && [ -t 0 ]; then
     printf '  PC (UEFI only -- see the note after you choose):\n'
     printf '    6) PC / laptop / Mac, 64-bit          (UEFI)             x86_64\n'
     printf '    7) PC, 32-bit                         (UEFI)             x86\n'
-    printf '  Virtual machine:\n'
+    printf '  Virtual machine (pair either with --image):\n'
     printf '    8) UTM / QEMU on Apple Silicon        (UEFI)             aarch64\n'
-    printf '       Native speed on an M-series Mac, and the way to try a\n'
-    printf '       change without writing a card. Pair it with --image.\n'
+    printf '       Native speed on an M-series Mac, and the same code path a\n'
+    printf '       Zero 2 W boots -- so it verifies the ARM targets too.\n'
+    printf '    9) UTM / QEMU, emulated x86_64        (UEFI)             x86_64\n'
+    printf '       Emulated on Apple Silicon, so slow -- but it is the same\n'
+    printf '       code path a real PC boots, and needs no PC.\n'
     while [ -z "$MODEL" ]; do
-        printf '\nPress 1-8 (or Ctrl-C to abort): '
-        read -r reply || die "no answer -- pass MODEL=zero2 (or pi3/pi4/pi5/pc/pc32/vm) instead"
+        printf '\nPress 1-9 (or Ctrl-C to abort): '
+        read -r reply || die "no answer -- pass MODEL=zero2 (or pi3/pi4/pi5/pc/pc32/vm/vmx86) instead"
         case "$reply" in
             1) MODEL=zero  ;;
             2) MODEL=pi2b  ;;
@@ -419,7 +422,8 @@ if [ -z "$MODEL" ] && [ -z "${ARCH:-}" ] && [ -t 0 ]; then
             6) MODEL=pc    ;;
             7) MODEL=pc32  ;;
             8) MODEL=vm    ;;
-            *) printf 'Not one of 1-8.\n' ;;
+            9) MODEL=vmx86 ;;
+            *) printf 'Not one of 1-9.\n' ;;
         esac
     done
     info "Board: MODEL=$MODEL"
@@ -448,11 +452,22 @@ case "$MODEL" in
     # See the PLATFORM block below for what changes and what does not.
     pc|x86_64|amd64|x64|uefi)             MODEL_ARCH=x86_64 ;;
     pc32|x86|i386|i686|ia32)              MODEL_ARCH=x86 ;;
-    # A VM on Apple Silicon. aarch64 because that is what the host is, and
-    # emulating x86_64 on an M-series Mac means TCG -- correct, but slow enough
-    # to change how often you would bother testing.
+    # Two VM models, because a VM is not one thing. VM=1 says "UEFI, virtio,
+    # no GPU firmware"; the architecture is a separate question, and on an
+    # Apple Silicon host the two answers have very different costs.
+    #
+    #   vm      aarch64, virtualised through HVF. Native speed, and the same
+    #           code path a Pi Zero 2 W boots -- which is what makes it a
+    #           regression test for the ARM targets rather than a toy.
+    #   vmx86   x86_64, emulated by TCG. Perhaps 5-20x slower, and worth it:
+    #           it is the same code path a real PC boots, so the pc target can
+    #           be verified without owning a PC.
+    #
+    # Until this existed, MODEL=vm implied aarch64 and there was no way to say
+    # "a VM, but x86_64" -- ARCH and VM could not both be chosen.
     vm|utm|qemu|virt|vm64)                MODEL_ARCH=aarch64; VM=1 ;;
-    *) die "unknown MODEL='$MODEL'. Use one of: zero, zero2, pi2b, pi3, pi4, pi5, pc, pc32, vm (or set ARCH= directly)" ;;
+    vmx86|vm-x86|vmx64|vm-x86_64|utm-x86|utm-x86_64) MODEL_ARCH=x86_64; VM=1 ;;
+    *) die "unknown MODEL='$MODEL'. Use one of: zero, zero2, pi2b, pi3, pi4, pi5, pc, pc32, vm, vmx86 (or set ARCH= directly)" ;;
 esac
 
 ALPINE_VER="${ALPINE_VER:-3.24.1}"
@@ -486,7 +501,7 @@ case "$MODEL" in
     # does a VM: QEMU's 'virt' machine generates its own device tree in memory
     # and hands it to the kernel, so there is nothing to put on the card.
     pc|x86_64|amd64|x64|uefi|pc32|x86|i386|i686|ia32) MODEL_DTB="" ;;
-    vm|utm|qemu|virt|vm64)        MODEL_DTB="" ;;
+    vm|utm|qemu|virt|vm64|vmx86|vm-x86|vmx64|vm-x86_64|utm-x86|utm-x86_64) MODEL_DTB="" ;;
     # MODEL unset (ARCH given directly): accept any device tree the tarball
     # ships, since we do not know the board.
     *)                            MODEL_DTB="" ;;
@@ -1478,21 +1493,36 @@ if [ "$VM" -eq 1 ]; then
 #       them nlplug-findfs scans an empty /dev, fails to find modloop, and
 #       drops to an initramfs shell -- the VM equivalent of the rainbow screen.
 #       sd-mod and usb-storage stay for a disk attached as USB instead.
-#   console=ttyAMA0        QEMU's 'virt' machine puts its serial on a PL011,
-#       which Linux calls ttyAMA0. NOT ttyS0 -- that is the x86 8250 and there
-#       is no such device here, so a card copied from the PC entry would boot
-#       to a console nobody can see.
 #
-# Both consoles are listed on the default entry so one card serves a UTM
+# THE SERIAL PORT IS PER-ARCHITECTURE, and this is not cosmetic: name the wrong
+# one and the machine boots perfectly to a console nobody can see, which looks
+# from outside exactly like a hang.
+#
+#   aarch64   ttyAMA0   QEMU's 'virt' machine puts its serial on a PL011, and
+#                       Linux calls that ttyAMA0.
+#   x86_64    ttyS0     The PC's 8250/16550 UART. There is no PL011 on a q35
+#                       machine, so ttyAMA0 names nothing at all.
+#
+# This used to be hardcoded to ttyAMA0 for every VM, which was correct while
+# MODEL=vm was the only VM and implied aarch64. MODEL=vmx86 is what made it
+# wrong, and it would have been wrong silently.
+case "$ARCH" in
+    aarch64) VM_SERIAL="ttyAMA0" ;;
+    x86_64|x86) VM_SERIAL="ttyS0" ;;
+    *)       VM_SERIAL="ttyS0" ;;
+esac
+info "VM serial console: $VM_SERIAL (ARCH=$ARCH)"
+
+# Both consoles are listed on the default entry so one image serves a UTM
 # window and a headless 'qemu -nographic' run without editing anything. The
 # last console= named is the one /dev/console points at, hence serial last.
-cat > "$MNT/boot/grub/grub.cfg" <<'GRUBCFG'
-# Generated by copal-prep.sh for MODEL=vm.
+cat > "$MNT/boot/grub/grub.cfg" <<GRUBCFG
+# Generated by copal-prep.sh for MODEL=${MODEL:-vm} (ARCH=$ARCH).
 set timeout=3
 set default=0
 
 menuentry "Copal Linux (virt -- serial + console)" {
-    linux /boot/vmlinuz-virt modules=loop,squashfs,sd-mod,usb-storage,virtio_blk,virtio_pci,virtio_scsi rootfstype=tmpfs console=tty0 console=ttyAMA0,115200
+    linux /boot/vmlinuz-virt modules=loop,squashfs,sd-mod,usb-storage,virtio_blk,virtio_pci,virtio_scsi rootfstype=tmpfs console=tty0 console=$VM_SERIAL,115200
     initrd /boot/initramfs-virt
 }
 
@@ -1502,11 +1532,11 @@ menuentry "Copal Linux (virt -- graphical console only)" {
 }
 
 menuentry "Copal Linux (lts -- full driver set)" {
-    linux /boot/vmlinuz-lts modules=loop,squashfs,sd-mod,usb-storage,virtio_blk,virtio_pci,virtio_scsi,ahci,nvme rootfstype=tmpfs console=tty0 console=ttyAMA0,115200
+    linux /boot/vmlinuz-lts modules=loop,squashfs,sd-mod,usb-storage,virtio_blk,virtio_pci,virtio_scsi,ahci,nvme rootfstype=tmpfs console=tty0 console=$VM_SERIAL,115200
     initrd /boot/initramfs-lts
 }
 GRUBCFG
-info "Wrote boot/grub/grub.cfg (virt default, serial on ttyAMA0)"
+info "Wrote boot/grub/grub.cfg (virt default, serial on $VM_SERIAL)"
 
 else
 
@@ -2028,13 +2058,52 @@ ensure_user_home() {  # [root prefix, e.g. /mnt]
     # directory its owner cannot write, which is worse than one that is absent
     # because nothing is left to notice. Repair that here rather than only the
     # missing case.
+    # The parent has to be traversable or the home is unreachable however
+    # perfect it is in itself. `mkdir -p /home/user` creates /home too, with
+    # whatever umask happened to be in force, and nothing here ever looked at
+    # it again -- so a home directory owned by the right user, with the right
+    # mode, could still give
+    #
+    #     login: can't change directory to '/home/user': Permission denied
+    #
+    # because the mode bits on /home said no. Fix the parents first: a
+    # directory nobody can walk through is not a private one, it is a broken
+    # one, and o+x costs nothing that o+r would not already have cost.
+    _parent=$(dirname "$_pfx$_uh")
+    while [ "$_parent" != "/" ] && [ "$_parent" != "." ] && [ -d "$_parent" ]; do
+        _pm=$(stat -c '%a' "$_parent" 2>/dev/null || echo "")
+        case "$_pm" in
+            *[1357])  : ;;                       # already world-traversable
+            "")       chmod o+x "$_parent" 2>/dev/null || true ;;
+            *)        warn "$_parent is mode $_pm -- '$PI_USER' cannot traverse it; adding o+x"
+                      chmod o+x "$_parent" 2>/dev/null || true ;;
+        esac
+        _parent=$(dirname "$_parent")
+    done
+
     if [ -d "$_pfx$_uh" ]; then
         [ -n "$_uid" ] || return 0
-        _now=$(stat -c '%u' "$_pfx$_uh" 2>/dev/null || echo "$_uid")
-        [ "$_now" = "$_uid" ] && return 0
-        warn "$_pfx$_uh is owned by uid $_now, not by $PI_USER -- fixing"
+        # NO fallback that assumes the answer is already right. This used to be
+        #     _now=$(stat -c '%u' ... || echo "$_uid")
+        # which reported the ownership as correct whenever stat could not
+        # answer, and returned having repaired nothing -- failing open, in the
+        # direction that leaves the account unable to enter its own home. An
+        # unreadable stat is now a reason to repair, not a reason to stop.
+        _now=$(stat -c '%u' "$_pfx$_uh" 2>/dev/null || echo "")
+        if [ -n "$_now" ] && [ "$_now" = "$_uid" ]; then
+            _hm=$(stat -c '%a' "$_pfx$_uh" 2>/dev/null || echo "")
+            case "$_hm" in
+                *[1357]) return 0 ;;   # owned correctly and enterable: done
+            esac
+            warn "$_pfx$_uh is mode $_hm -- its owner cannot enter it; fixing"
+        elif [ -z "$_now" ]; then
+            warn "cannot read the ownership of $_pfx$_uh -- repairing it anyway"
+        else
+            warn "$_pfx$_uh is owned by uid $_now, not by $PI_USER -- fixing"
+        fi
         chown -R "$_uid:$_gid" "$_pfx$_uh" 2>/dev/null || true
-        note "now owned by $PI_USER ($_uid:$_gid)"
+        chmod 0755 "$_pfx$_uh" 2>/dev/null || true
+        note "now owned by $PI_USER ($_uid:$_gid), mode 0755"
         return 0
     fi
 
@@ -5703,10 +5772,65 @@ SSHCFG=/etc/ssh/sshd_config
 SSH_BEGIN='# >>> copal ssh policy >>>'
 SSH_END='# <<< copal ssh policy <<<'
 
-ssh_has_key() {  # is there a usable authorized_keys for the admin user?
+ssh_has_key() {  # is there an authorized_keys file with a key in it?
     _hd=$(user_home)
     [ -n "$_hd" ] && [ -s "$_hd/.ssh/authorized_keys" ] \
         && grep -qE '^(ssh-(ed25519|rsa)|ecdsa-sha2-|sk-)' "$_hd/.ssh/authorized_keys" 2>/dev/null
+}
+
+# Whether sshd will actually ACCEPT that key, which is a different question and
+# the one that matters. ssh_has_key runs as root, and root can read anything --
+# so it answers "is the file there", not "can the daemon use it".
+#
+# This distinction is not academic. It produced a real lockout: stage 3 left
+# /home/$PI_USER in a state its owner could not enter, stage 6 wrote the key
+# into it, ssh_has_key said yes because root could read the file, the policy
+# disabled password authentication on the strength of that, and stage 13 then
+# locked root. The result was a machine that refused every SSH login by every
+# method and could only be reached from the console:
+#
+#     login: can't change directory to '/home/user': Permission denied
+#
+# sshd applies StrictModes before it will read a key: the home directory, .ssh
+# and authorized_keys must each be owned by that user (or root) and must not be
+# group- or world-writable. Any one of those failing makes it ignore the key
+# and say nothing useful about why.
+strictmodes_ok() {  # <path> -- owned by the user or root, no group/other write
+    _p="$1"
+    [ -e "$_p" ] || return 1
+    _want=$(id -u "$PI_USER" 2>/dev/null) || return 1
+    # No fallback that assumes success: a stat that cannot answer is a reason
+    # to refuse, not a reason to proceed.
+    _own=$(stat -c '%u' "$_p" 2>/dev/null) || return 1
+    _mode=$(stat -c '%a' "$_p" 2>/dev/null) || return 1
+    [ -n "$_own" ] && [ -n "$_mode" ] || return 1
+    [ "$_own" = "$_want" ] || [ "$_own" = 0 ] || return 1
+    while [ "${#_mode}" -lt 4 ]; do _mode="0$_mode"; done
+    case "$(printf '%s' "$_mode" | cut -c3)" in 2|3|6|7) return 1 ;; esac
+    case "$(printf '%s' "$_mode" | cut -c4)" in 2|3|6|7) return 1 ;; esac
+    return 0
+}
+
+# Ask the operating system rather than infer from mode bits: can the account
+# actually get into its own home and read its own key? This is what catches a
+# home directory that is fine in itself but sits under a parent the user cannot
+# traverse -- the mode bits on the home say nothing about /home above it.
+home_reachable() {
+    _hd=$(user_home)
+    [ -n "$_hd" ] || return 1
+    su -s /bin/sh "$PI_USER" -c "cd '$_hd' && test -r '$_hd/.ssh/authorized_keys'" \
+        >/dev/null 2>&1
+}
+
+ssh_key_usable() {
+    _hd=$(user_home)
+    [ -n "$_hd" ] || return 1
+    ssh_has_key || return 1
+    strictmodes_ok "$_hd"                          || { warn "$_hd fails sshd StrictModes"; return 1; }
+    strictmodes_ok "$_hd/.ssh"                     || { warn "$_hd/.ssh fails sshd StrictModes"; return 1; }
+    strictmodes_ok "$_hd/.ssh/authorized_keys"     || { warn "$_hd/.ssh/authorized_keys fails sshd StrictModes"; return 1; }
+    home_reachable                                 || { warn "'$PI_USER' cannot reach $_hd -- check the modes on its parents"; return 1; }
+    return 0
 }
 ssh_policy_present() { grep -qF "$SSH_BEGIN" "$SSHCFG" 2>/dev/null; }
 ssh_password_on()    { sed -n "/$SSH_BEGIN/,/$SSH_END/p" "$SSHCFG" 2>/dev/null \
@@ -5824,7 +5948,11 @@ stage_sshkey() {
         doas copal-ssh status          # what is in force now
 
 MSG
-    if ssh_has_key; then
+    # ssh_key_usable, NOT ssh_has_key. The difference is the whole guard: one
+    # asks whether the file exists, the other whether sshd will accept it. The
+    # first is what this used to check, and it disabled password login on a key
+    # the daemon then refused -- see ssh_key_usable for the lockout that made.
+    if ssh_key_usable; then
         AUTO_DEFAULT=y
         if confirm_yes "Require the key and disable password login over SSH?"; then
             ssh_write_policy no || warn "policy not applied"
@@ -5833,13 +5961,18 @@ MSG
             ssh_write_policy yes || warn "policy not applied"
         fi
     else
-        # The guard that matters. No key means key-only would lock the machine
-        # out of the network entirely, so it is not offered -- not even in
-        # automatic mode, where nobody is watching.
-        warn "no usable key in $HOMEDIR/.ssh/authorized_keys."
+        # The guard that matters. Without a key sshd will actually honour,
+        # key-only locks the machine off the network entirely, so it is not
+        # offered -- not even in automatic mode, where nobody is watching.
+        if ssh_has_key; then
+            warn "there IS a key in $HOMEDIR/.ssh/authorized_keys, but sshd will not use it."
+            warn "The warnings above say which check failed."
+        else
+            warn "no key in $HOMEDIR/.ssh/authorized_keys."
+        fi
         warn "NOT disabling password login -- that would lock you out entirely."
         ssh_write_policy yes || warn "policy not applied"
-        note "Install a key, then: doas copal-ssh password off"
+        note "Fix the ownership, then: doas copal-ssh password off"
     fi
 
     say "Installing /usr/local/bin/copal-ssh"
@@ -11531,7 +11664,23 @@ $(info "Done. $IMAGE_PATH is written and detached.")
   $(du -h "$IMAGE_PATH" | awk '{print $1}') on disk, ${IMAGE_SIZE} apparent (sparse -- it grows as it is used).
 
 EOF
-    if [ "$VM" -eq 1 ]; then
+    if [ "$VM" -eq 1 ] && [ "$ARCH" != aarch64 ]; then
+        cat <<EOF
+  Boot it in UTM:
+
+    ./utm/utm-vm.sh create --target x86_64 --image $IMAGE_ABS
+    ./utm/utm-vm.sh start  --target x86_64
+
+  copal-vm.sh is not the tool for this one: it runs qemu-system-aarch64, and
+  this image is $ARCH. UTM has the matching emulator and the OVMF firmware
+  already. Expect it to be slow -- an x86_64 guest on Apple Silicon is
+  translated instruction by instruction, not virtualised.
+
+  Serial console is on ttyS0, not ttyAMA0. That is the whole difference
+  between this image and the aarch64 one at the boot-configuration level.
+
+EOF
+    elif [ "$VM" -eq 1 ]; then
         cat <<EOF
   Boot it:
 

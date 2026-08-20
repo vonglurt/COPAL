@@ -138,9 +138,51 @@ rather than where it is going.
 | PC targets (`x86_64`, `x86`) | **Working** — inherited unchanged from Copal |
 | `MODEL=vm` aarch64 image for QEMU/UTM | **Working** — inherited; boots under `copal-vm.sh` |
 | `utm-aarch64` as a registered UTM VM | **Working** — `utm/utm-vm.sh` builds, registers and starts it; NAT, VirtFS share and UEFI boot all verified on UTM 4.7.4 |
-| `utm-x86_64` as a target at all | Not yet built — `MODEL=vm` implies aarch64, and the VM GRUB config hardcodes `console=ttyAMA0`, which is the ARM PL011 and does not exist on x86 |
-| Desktop (stage 4) under virtio-gpu | Not yet verified — stage 4 installs `xf86-video-fbdev`, chosen for the Pi's VideoCore |
+| `utm-x86_64` as a target at all | **Working** — `MODEL=vmx86` sets `ARCH=x86_64` with `VM=1`, and the VM serial console now follows the architecture (`ttyAMA0` on ARM, `ttyS0` on x86) instead of being hardcoded |
+| Desktop (stage 4) under virtio-gpu | Stage 4 completes; whether X starts is still being confirmed. It installs `xf86-video-fbdev`, chosen for the Pi's VideoCore |
+| SSH key lockout in stages 6 + 13 | **Fixed** — see below |
 | Split of `copal-prep.sh` into `lib/` + a real `guest/copal-init.sh` | Not yet done |
+
+### The lockout, and why it happened
+
+A full automatic run produced a machine that refused every SSH login by every
+method, reachable only from its console:
+
+```
+login: can't change directory to '/home/user': Permission denied
+```
+
+Three things had to line up, and they did. Stage 3 moves `/` onto ext4 and the
+admin user's home does not survive intact. `ensure_user_home` is meant to repair
+that, and its ownership check read
+
+```sh
+_now=$(stat -c '%u' "$_pfx$_uh" 2>/dev/null || echo "$_uid")
+[ "$_now" = "$_uid" ] && return 0
+```
+
+— which reports the ownership as *already correct* whenever `stat` cannot
+answer, and returns having repaired nothing. It failed open, in the direction
+that leaves an account unable to enter its own home. It also never looked at
+`/home` itself, so a correctly-owned home under an untraversable parent passed
+every check it made.
+
+Then stage 6 asked `ssh_has_key()` whether a key was installed. That function
+runs as **root**, and root can read anything — so it answers *"is the file
+there"*, not *"will sshd accept it"*. It said yes, and the policy disabled
+password authentication on the strength of it. Stage 13 then locked root, as
+designed. Every route in was now closed.
+
+The fix is in three places: `ensure_user_home` no longer treats an unreadable
+`stat` as success and now makes the parent chain traversable; a new
+`ssh_key_usable()` applies sshd's own StrictModes rules *and* asks the OS
+directly, via `su`, whether the account can reach its own key; and stage 6 gates
+the password-disabling decision on that instead of on mere existence.
+
+The guard was always there in intent — the code says *"NOT disabling password
+login -- that would lock you out entirely."* It just asked the wrong question.
+
+### Still to do
 
 Today `copal-init.sh` is a 9,600-line quoted heredoc inside `copal-prep.sh`.
 Making it a real file is the single most valuable structural change available —
