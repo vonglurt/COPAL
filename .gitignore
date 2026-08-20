@@ -43,3 +43,28 @@ run-log-*.txt
 .Spotlight-V100
 .fseventsd
 .Trashes
+
+# Generated per-machine configuration. None of this is ever supposed to appear
+# in the repository, and it does not today -- copal-prep.sh writes these onto
+# the card or image, which is itself ignored above. They are listed anyway
+# because the cost of being wrong is asymmetric: they carry the git identity
+# read from THIS Mac's git config, the chosen hostname and the admin username.
+#
+# No password is stored in any of them. The identity is not a credential and
+# nothing authenticates with it -- but it is a real name and a real address
+# belonging to whoever wrote the card, and that does not belong in a public
+# repository just because it was convenient to put on a boot partition.
+copal.conf
+copal-git
+answers.txt
+usercfg.txt
+authorized_keys
+firstrun.log
+copal-auto
+copal-timings
+
+# The build transcripts. *.log above already covers these; named because they
+# quote the identity verbatim in the "Git identity offered:" line.
+copal-prep-auto*.log
+copal-vm-check.log
+run-log-*.txt
