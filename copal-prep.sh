@@ -4405,6 +4405,10 @@ stage_gui() {
     # font-dejavu, not ttf-dejavu: Alpine renamed the font packages to the
     # font-* prefix and the old name resolves to nothing.
     add_optional i3lock xterm font-terminus font-dejavu xsetroot jgmenu
+    # Both remap Caps Lock to Super in .xinitrc -- see the comment there for
+    # why that key matters more than it looks. Either one is enough; they are
+    # a few kilobytes each and setup-xorg-base does not guarantee them.
+    add_optional setxkbmap xmodmap
 
     # A terminal, a file manager, a task manager. pcmanfm is the lightest of
     # the GTK file managers; htop is the task manager -- a GUI one would cost
@@ -4430,6 +4434,41 @@ stage_gui() {
 # this board does not have to spare.
 # A solid colour before i3 starts, so the first frame is never the X root
 # weave. i3 then runs copal-splash, which paints the key bindings over it.
+# Caps Lock becomes a second Super key.
+#
+# On a Mac host this is the difference between a usable desktop and a
+# minefield. The Mac's Command key arrives in this guest as Super, so every
+# Super binding in i3 is simultaneously a macOS shortcut -- and three of them
+# end the session outright: Cmd+W stops the VM mid-write, Cmd+Q quits UTM and
+# every machine in it, Cmd+Shift+Q logs out of macOS. Nothing inside the guest
+# can defend against that, because the key is taken by the host before this
+# machine is offered it.
+#
+# Pressing Caps Lock instead sends a key macOS reserves nothing on. The whole
+# binding set becomes reachable AND safe, and not one binding has to move.
+#
+# UTM has to be told to pass the key through rather than sync it as a host
+# toggle. Once, on the Mac:
+#
+#     defaults write com.utmapp.UTM IsCapsLockKey -bool true
+#
+# On real hardware it costs a Caps Lock nobody wanted and gains a large key
+# under the left pinky, so it is done unconditionally rather than guessing at
+# the host from inside the guest.
+if command -v setxkbmap >/dev/null 2>&1; then
+    setxkbmap -option caps:super 2>/dev/null || true
+fi
+# Verified, not assumed. setxkbmap exits 0 even when xkbcomp rejected the
+# option, so on an xkeyboard-config too old or too trimmed to carry
+# caps:super the keyboard would be left silently unchanged -- which is worse
+# than either outcome, because the failure only shows up as a VM that stopped
+# itself. If the Caps_Lock keysym is still bound anywhere, it did not take,
+# and the xmodmap form works on any X there has ever been.
+if command -v xmodmap >/dev/null 2>&1 && xmodmap -pke 2>/dev/null | grep -q Caps_Lock; then
+    xmodmap -e 'clear lock' \
+            -e 'keysym Caps_Lock = Super_L' \
+            -e 'add mod4 = Super_L' 2>/dev/null || true
+fi
 command -v xsetroot >/dev/null && xsetroot -solid '#1a1b26'
 exec i3
 XINIT
@@ -4547,6 +4586,94 @@ bindsym $mod+Shift+5 move container to workspace number 5
 # which -- Super+Tab is taken by the split/tabbed toggle above.
 bindsym $mod+Ctrl+Right workspace next
 bindsym $mod+Ctrl+Left  workspace prev
+
+# ---------------------------------------------------------------------------
+# WHEN THE HOST STEALS A KEY
+#
+# Under UTM on a Mac, some of the bindings above never arrive. The Mac's
+# Command key reaches this guest as Super, so every shortcut macOS reserves
+# for itself is a Super binding that quietly does nothing here -- and does
+# something on the Mac instead, which is the worse half of the problem:
+#
+# THREE OF THEM DESTROY THE SESSION, and no binding in this file can stop
+# that. The key is taken by macOS before the guest is offered it, so i3 never
+# gets a chance to grab it, ignore it, or bind it to nothing. An alternate
+# binding gives you another way to do the thing -- it does NOT take the
+# dangerous key away. Only the Mac can do that; see the last paragraph.
+#
+#   Super + W              CLOSES THE VM WINDOW, which stops the machine.
+#                          If UTM's quit confirmation has been turned off it
+#                          happens with no dialog and no warning -- the same
+#                          as pulling the power, mid-write.
+#   Super + Q              QUITS UTM. Every running VM, not just this one.
+#   Super + Shift + Q      LOGS OUT OF macOS.
+#
+# The rest merely go missing, which is the harmless half:
+#
+#   Super + Space          Spotlight opens on the Mac. The launcher -- the
+#                          most used binding in this config -- never runs.
+#   Super + Tab            the Mac's application switcher.
+#   Super + Shift + 3/4/5  macOS screenshots. Cmd+Shift+3 photographs the
+#                          screen; it does not move a window to workspace 3.
+#   Super + H              Hide the front application.
+#   Super + M              Minimise the window.
+#   Super + comma          Preferences -- UTM's own settings window opens.
+#   Super + F1             toggles display mirroring.
+#   Super + Ctrl + arrows  Mission Control, moving between Mac desktops.
+#
+# So each of those gets a SECOND binding on a modifier macOS does not
+# reserve. One rule, not a table to memorise: WHERE SUPER IS EATEN, PRESS
+# CTRL+ALT INSTEAD. The rest of the binding stays exactly where it was.
+#
+# Ctrl+Alt rather than plain Ctrl, because i3 grabs a binding globally and
+# system-wide: Ctrl+W and Ctrl+H bound here would stop being kill-word and
+# backspace in every terminal on the machine, for good. Ctrl+Alt is claimed
+# by nothing in i3 and nothing in a shell. On the Mac side it is claimed only
+# by VoiceOver, which is off unless you turned it on -- if it is on, these
+# are the bindings it will take.
+#
+# These are additions, not replacements. The Super bindings above still work,
+# and on real hardware -- a Pi, a PC -- nothing steals them, so nothing here
+# is needed. Extra grabs cost a few bytes of i3's key table. Delete the block
+# if you want them gone.
+#
+# For the three destructive ones the fix is not here, it is on the Mac, and it
+# is worth doing once:
+#
+#   defaults write com.utmapp.UTM NoQuitConfirmation -bool false
+#       Puts back the "are you sure" dialog on closing a VM window. If
+#       Super + W has already stopped a machine out from under you without
+#       asking, this preference is why.
+#
+#   System Settings > Keyboard > Keyboard Shortcuts > App Shortcuts > +
+#       Application UTM, menu title "Close", new shortcut Cmd+Shift+W.
+#       Moving the menu item's key is what actually takes Cmd+W away from
+#       UTM; nothing inside the guest can.
+bindsym Ctrl+Mod1+space       exec dmenu_run
+bindsym Ctrl+Mod1+Tab         focus mode_toggle
+bindsym Ctrl+Mod1+h           focus left
+bindsym Ctrl+Mod1+w           layout tabbed
+bindsym Ctrl+Mod1+comma       exec copal-config
+bindsym Ctrl+Mod1+slash       exec $helpcmd
+bindsym Ctrl+Mod1+Shift+q     kill
+bindsym Ctrl+Mod1+Shift+space floating toggle
+bindsym Ctrl+Mod1+Shift+1 move container to workspace number 1
+bindsym Ctrl+Mod1+Shift+2 move container to workspace number 2
+bindsym Ctrl+Mod1+Shift+3 move container to workspace number 3
+bindsym Ctrl+Mod1+Shift+4 move container to workspace number 4
+bindsym Ctrl+Mod1+Shift+5 move container to workspace number 5
+bindsym Ctrl+Mod1+Right workspace next
+bindsym Ctrl+Mod1+Left  workspace prev
+
+# The launcher gets plain Ctrl+Space on top of the Ctrl+Alt one. It is the
+# binding reached most often and the one Spotlight takes most reliably, and
+# two extra fingers on the most frequent action of the day is a bad trade.
+#
+# This line DOES cost something, unlike the block above: i3 grabs Ctrl+Space
+# globally, so it stops reaching emacs as set-mark and IBus as its input
+# switcher. If either matters more than the launcher does, delete this line
+# and use Ctrl+Alt+Space, which does the same job and takes nothing away.
+bindsym Ctrl+space exec dmenu_run
 
 floating_modifier $mod
 bindsym $mod+Shift+s exec i3lock -c 1c1c1c
@@ -5639,7 +5766,8 @@ COPALSPLASH
  Show this list again at any time with   Super + /   or   Super + F1
 
  START SOMETHING
-   Super + Space        run a program -- type a few letters, Enter.
+   Super + Space        run a program (Ctrl + Space too -- see the UTM
+                        note below) -- type a few letters, Enter.
                         Lists EVERY executable on your PATH, so anything
                         you install shows up here automatically.
    Super + D            the same thing (dmenu)
@@ -5696,6 +5824,72 @@ COPALSPLASH
    The bar says "status_command process exited unexpectedly":
        i3status -c ~/.config/i3status/config -n 1
    That prints the actual parse error, which the bar will not tell you.
+
+ IF YOU ARE RUNNING THIS IN UTM ON A MAC
+   The Mac's Command key arrives here as Super, so macOS claims some of the
+   bindings above before this machine ever sees them. Spotlight on Cmd+Space
+   is the one you meet first, and it swallows the launcher.
+
+   PRESS CAPS LOCK INSTEAD OF SUPER AND NONE OF THIS APPLIES. Caps Lock is
+   set up as a second Super key on this machine, and macOS reserves nothing
+   on it, so CapsLock+W is "tabbed layout" and not "stop the virtual
+   machine". Every binding above works from it, unchanged. It needs UTM told
+   to pass the key through, once, on the Mac:
+       defaults write com.utmapp.UTM IsCapsLockKey -bool true
+   The Fn / globe key cannot do this job: macOS handles it in the keyboard
+   driver, there is no USB HID code for it, and UTM has no support for it --
+   it never reaches this machine in any form.
+
+   If you press the real Super key anyway, the rest of this section applies.
+
+   THREE OF THEM END THE SESSION, and nothing in this system can prevent
+   it -- macOS takes the key before this machine is offered it, so i3 never
+   sees it to ignore. A second binding gives you another way in; it does
+   not disarm the first. Do not press these on a Mac host:
+
+     Super + W          closes the VM window and stops the machine, with
+                        no dialog if UTM's confirmation has been switched
+                        off. The same as pulling the power, mid-write.
+     Super + Q          quits UTM, and every VM running in it.
+     Super + Shift + Q  logs out of macOS.
+
+   Every affected binding has a second one, and the rule IS the table:
+   WHERE SUPER IS EATEN, PRESS CTRL+ALT INSTEAD.
+
+     Super + Space        ->  Ctrl + Space  (or Ctrl + Alt + Space)
+     Super + Tab          ->  Ctrl + Alt + Tab
+     Super + H            ->  Ctrl + Alt + H
+     Super + W            ->  Ctrl + Alt + W
+     Super + ,            ->  Ctrl + Alt + ,
+     Super + /            ->  Ctrl + Alt + /
+     Super + Shift + Q    ->  Ctrl + Alt + Shift + Q
+     Super + Shift + 1..5 ->  Ctrl + Alt + Shift + 1..5
+     Super + Ctrl + arrow ->  Ctrl + Alt + Left / Right
+
+   What macOS is doing with them, so the behaviour is not a mystery:
+     Cmd + Space          Spotlight
+     Cmd + Tab            application switcher
+     Cmd + Shift + 3/4/5  screenshots
+     Cmd + Shift + Q      log out of macOS
+     Cmd + H              hide the front application
+     Cmd + ,              application preferences -- UTM's own
+     Cmd + W              close the UTM window -- STOPS THIS MACHINE
+     Cmd + Q              quit UTM -- stops every machine
+     Cmd + F1             mirror displays
+     Ctrl + arrows        Mission Control, switch Mac desktop
+
+   Or take the keys back on the Mac side, which is the better fix on a
+   machine that is yours to configure:
+     System Settings > Keyboard > Keyboard Shortcuts > Spotlight
+       untick "Show Spotlight search" and Cmd+Space is free for good
+     UTM > Settings > Input
+       "Capture input automatically when window is focused" hands more of
+       the keyboard to the guest while its window has focus
+     System Settings > Keyboard > Keyboard Shortcuts > App Shortcuts > +
+       Application UTM, menu title "Close", shortcut Cmd+Shift+W. This is
+       the only thing that genuinely takes Cmd+W away from UTM.
+     On the Mac, to get the confirmation dialog back:
+       defaults write com.utmapp.UTM NoQuitConfirmation -bool false
 
  FILES
    ~/.config/i3/config          bindings and colours

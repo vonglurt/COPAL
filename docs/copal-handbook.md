@@ -1087,6 +1087,84 @@ and degrades to a plain colour if ImageMagick or feh is missing.
 | **Super + Shift + R** | Reload i3 (after editing its config) |
 | **Super + Shift + E** | Leave i3 |
 
+### When the Mac takes the key first
+
+Only relevant on the UTM targets. The Mac's Command key arrives in the guest as
+Super, so every shortcut macOS reserves for itself is a Super binding that never
+reaches i3 — and fires something on the Mac instead. Spotlight on **Cmd + Space**
+is the one you meet first, and it swallows the launcher, which is the binding you
+reach for most.
+
+**Press Caps Lock instead of Super and none of this applies.** Copal's `.xinitrc`
+maps Caps Lock to a second Super key, and macOS reserves nothing on Caps Lock, so
+`CapsLock + W` is *tabbed layout* and not *stop the virtual machine*. Every
+binding in the tables above works from it, unmoved. UTM has to be told to pass
+the key through instead of syncing it as a host toggle — once, on the Mac:
+
+```sh
+defaults write com.utmapp.UTM IsCapsLockKey -bool true
+defaults write com.utmapp.UTM NoQuitConfirmation -bool false   # and put the
+                                                               # "are you sure"
+                                                               # dialog back
+```
+
+Three of the Super bindings do not merely go missing — they end the session, and
+no binding in the guest can prevent it, because the host takes the key before the
+guest is offered it:
+
+| Key | What the Mac does |
+|---|---|
+| **Super + W** | Closes the VM window, stopping the machine mid-write |
+| **Super + Q** | Quits UTM, and every VM running in it |
+| **Super + Shift + Q** | Logs out of macOS |
+
+The **Fn / globe key cannot be used** as a modifier, which is the first thing
+everyone asks. macOS handles Fn in the keyboard driver and emits no key event for
+it; there is no USB HID usage code to send, Apple carrying it on a vendor page;
+and UTM's binary contains no reference to Fn, Globe or `kVK_Function`. It never
+reaches the guest in any form. Its three keyboard preferences are `IsCapsLockKey`,
+`IsCtrlCmdSwapped` and `IsISOKeySwapped` — Caps Lock is the only one of the three
+that buys a free modifier.
+
+If you press the real Super key anyway, every affected binding has a second one,
+and the rule is the whole table: **where Super is eaten, press Ctrl + Alt
+instead.** The rest of the binding does not move.
+
+| Instead of | Press | Because macOS uses it for |
+|---|---|---|
+| **Super + Space** | **Ctrl + Space**, or Ctrl + Alt + Space | Spotlight |
+| **Super + Tab** | **Ctrl + Alt + Tab** | Application switcher |
+| **Super + H** | **Ctrl + Alt + H** | Hide the front application |
+| **Super + W** | **Ctrl + Alt + W** | Close the UTM window |
+| **Super + comma** | **Ctrl + Alt + comma** | Application preferences — UTM's own |
+| **Super + /** | **Ctrl + Alt + /** | (Super + F1 mirrors displays) |
+| **Super + Shift + Q** | **Ctrl + Alt + Shift + Q** | Log out of macOS |
+| **Super + Shift + 1..5** | **Ctrl + Alt + Shift + 1..5** | Cmd+Shift+3/4/5 are screenshots |
+| **Super + Ctrl + arrows** | **Ctrl + Alt + Left / Right** | Mission Control, switch desktop |
+
+Ctrl + Alt rather than plain Ctrl, because i3 grabs a binding globally: Ctrl + W
+and Ctrl + H bound in i3 would stop being kill-word and backspace in every
+terminal on the machine, permanently. Ctrl + Alt is claimed by nothing in i3 and
+nothing in a shell — on the Mac side only by VoiceOver, which is off unless you
+turned it on.
+
+The launcher is the one exception, and it does cost something. **Ctrl + Space**
+is bound as well as Ctrl + Alt + Space, because it is reached dozens of times a
+day and Spotlight takes it most reliably. i3 grabs it globally, so it stops
+reaching emacs as set-mark and IBus as its input switcher. If either matters
+more, delete that one line from `~/.config/i3/config` and use Ctrl + Alt + Space.
+
+On a Pi or a PC nothing steals anything and none of this applies; the extra
+bindings are harmless there and are written unconditionally.
+
+Or take the keys back on the Mac side, which is the better fix on a machine that
+is yours to configure:
+
+- **System Settings → Keyboard → Keyboard Shortcuts → Spotlight** — untick *Show
+  Spotlight search* and Cmd + Space is free for good.
+- **UTM → Settings → Input** — *Capture input automatically when window is
+  focused* hands more of the keyboard to the guest while its window has focus.
+
 ### Inside a terminal
 
 The multiplexer prefix is **Ctrl-B** for tmux and **Ctrl-A** for screen. Full

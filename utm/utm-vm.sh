@@ -415,6 +415,53 @@ require_bundle() {
 # ----------------------------------------------------------------- actions ---
 do_config() { write_config "PREVIEW-DISK-UUID" "PREVIEW-VM-UUID" "16:00:00:00:00:00"; }
 
+# --------------------------------------------------------------- keyboard ---
+# Two UTM preferences decide whether this guest is pleasant or dangerous, and
+# neither lives in the VM bundle -- they are application-wide, so utm-vm.sh
+# reports on them rather than writing them behind your back.
+#
+# The problem they solve: the Mac's Command key arrives in the guest as Super,
+# which is i3's modifier for everything. So every i3 binding is also a macOS
+# shortcut, and three of them end the session -- Cmd+W stops the VM mid-write,
+# Cmd+Q quits UTM and every machine in it, Cmd+Shift+Q logs out of macOS. The
+# guest cannot defend itself: the key is taken by the host before the guest is
+# offered it, so there is no binding, grab or 'nop' that helps.
+#
+# IsCapsLockKey is the fix. Copal's .xinitrc maps Caps Lock to a second Super
+# key, and macOS reserves nothing on Caps Lock -- so CapsLock+W is "tabbed
+# layout" and Cmd+W is still "stop the machine", and you simply stop using the
+# second one. But UTM swallows Caps Lock as a host-synchronised toggle unless
+# this is on, and then the remap has nothing to remap.
+#
+# NoQuitConfirmation is the seatbelt for the times you press Cmd+W anyway.
+# Set to true it closes the window with no dialog, which is how a VM gets
+# stopped out from under you with no warning at all.
+#
+# The Fn / globe key cannot be pressed into service here, which is the first
+# thing everyone asks: macOS handles Fn in the keyboard driver and emits no
+# key event for it, there is no USB HID usage code to send, and UTM contains
+# no reference to it. It never reaches the guest in any form.
+keyboard_prefs() {
+    _d=com.utmapp.UTM
+    _caps=$(defaults read "$_d" IsCapsLockKey 2>/dev/null || echo 0)
+    _quit=$(defaults read "$_d" NoQuitConfirmation 2>/dev/null || echo 0)
+    [ "$_caps" = 1 ] && [ "$_quit" != 1 ] && return 0
+    printf '\n' >&2
+    warn "two UTM keyboard preferences are not set the way this guest expects"
+    if [ "$_caps" != 1 ]; then
+        note "Caps Lock is being swallowed by the host, so the guest's"
+        note "Caps-Lock-as-Super remap has nothing to work with:"
+        note "    defaults write $_d IsCapsLockKey -bool true"
+    fi
+    if [ "$_quit" = 1 ]; then
+        note "closing a VM window asks for no confirmation, so Cmd+W stops"
+        note "the machine silently, mid-write:"
+        note "    defaults write $_d NoQuitConfirmation -bool false"
+    fi
+    note "Quit and reopen UTM afterwards; it reads both at launch."
+    printf '\n' >&2
+}
+
 do_create() {
     [ -n "$IMAGE" ] || die "create needs --image (the .img from copal-prep.sh)"
     [ -f "$IMAGE" ] || die "no such image: $IMAGE"
@@ -464,6 +511,7 @@ do_create() {
     # ends up at the EFI shell for no visible reason.
 
     info "Created $BUNDLE"
+    keyboard_prefs
     printf '\n' >&2
     printf '    %-16s %s\n' "Name"      "$NAME" >&2
     printf '    %-16s %s\n' "Target"    "$TARGET ($ARCHITECTURE / $MACHINE)" >&2
@@ -505,6 +553,15 @@ do_create() {
 
   Stage 1 is what configures the network. Until it has run, eth0 is down and
   the guest has no address -- that is Alpine's diskless default, not a fault.
+
+  THE KEYBOARD. Once stage 4 has put a desktop up, use CAPS LOCK where the key
+  list says Super. The Mac's Command key arrives in the guest as Super, so i3's
+  bindings double as macOS shortcuts and three of them end the session: Cmd+W
+  stops this machine mid-write, Cmd+Q quits UTM and every machine in it, and
+  Cmd+Shift+Q logs out of macOS. Caps Lock is mapped to a second Super inside
+  the guest and macOS claims nothing on it, so the same bindings become safe.
+  Nothing in the guest can protect the Command key itself -- the host takes it
+  first.
 
 NEXT
 }
