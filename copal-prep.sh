@@ -2704,6 +2704,8 @@ Documents|PDF tools (poppler)|poppler-utils|pdftotext|h|*
 Documents|qpdf (split/merge/repair PDF)|qpdf|qpdf|h|*
 Editors|Mousepad (small GUI editor)|mousepad|mousepad|x|*
 Editors|Geany (programmer's editor)|geany|geany|x|*
+Editors|Kate (KDE - LSP client built in)|kate|kate|x|!v6
+Editors|Emacs (Eglot LSP built in; -nw for terminal)|emacs-x11|emacs|x|*
 Editors|gedit (GNOME editor)|gedit|gedit|x|*
 Editors|micro (terminal - modeless)|micro|micro|t|*
 Editors|Helix (terminal - modal, batteries in)|helix|hx|t|*
@@ -6834,6 +6836,14 @@ COMPILING AND DEBUGGING -- the whole loop, in one editor
 
    ~/.vimrc is shared by both. ~/.config/nvim/lsp.lua is the Neovim-only half.
 
+   Two more are configured if you install them, from the SAME server table:
+
+      kate    a graphical IDE. LSP already on. 'copal-guide kate'
+      emacs   Eglot, built in, no packages. 'copal-guide emacs'
+
+   All four are told about language servers by one list inside copal-init.sh,
+   so a server added there is a server all of them find.
+
  ---------------------------------------------------------------------------
  1. BUILDING
  ---------------------------------------------------------------------------
@@ -7019,18 +7029,33 @@ COMPILING AND DEBUGGING -- the whole loop, in one editor
    If you want menus and a mouse instead:
 
       geany         light, real build system, F5 compiles. Installed already.
+      kate          LSP already on, and the best of these per megabyte.
+                    ~590 MB with Qt and KDE Frameworks. Not on ARMv6.
+      emacs         Eglot built in, no packages, and the only one of these
+                    that exists for EVERY board Copal targets. ~170 MB.
       codeblocks    a full C/C++ IDE with GDB breakpoints in the margin.
                     Click the margin to set one, F8 to debug. Every port.
-      kdevelop      heavier, better. aarch64 only.
-      vscodium      VS Code without the telemetry. aarch64 only, edge/testing.
-      lapce         modern, Rust, built-in LSP. aarch64 only.
+      kdevelop      heavier, better, and about a gigabyte. 64-bit only.
+      vscodium      VS Code without the telemetry. 64-bit, edge/testing.
+      lapce         modern, Rust, built-in LSP. 64-bit only.
 
    There is no VS Code for ARMv6 and there never will be: Electron dropped
-   32-bit ARM years ago. On a Pi Zero the honest answer is nvim or Geany, and
-   nvim with the language servers above is the more capable of the two.
-   Install any of these from the menu: Super+C, then Devtools.
+   32-bit ARM years ago. Neither is there Kate -- Alpine does not build the
+   KDE stack for that architecture. On a Pi Zero the choice is nvim, emacs or
+   Geany, and the first two are the ones that speak LSP.
+
+   ONE THING NONE OF THE GRAPHICAL ONES DO. 'Who calls this function' -- the
+   call hierarchy -- is missing from Kate's LSP client and from Eglot alike.
+   Of everything Copal configures, only nvim has it, on \ci and \co. It is
+   worth knowing before you pick, because it is the navigation people miss
+   most when they leave a graphical IDE, and here the graphical ones are the
+   ones without it.
+
+   Install any of these from the menu: Super+C, then Devtools or Editors.
 
    See also:  copal-guide nvim        the editor itself, in depth
+              copal-guide kate        the graphical one, if you installed it
+              copal-guide emacs       Eglot, and why there are no packages
               copal-guide languages   what exists on which board
               copal-guide tmux        keeping a build running
 GUIDE
@@ -7168,6 +7193,199 @@ NEOVIM -- a primer, from nothing to useful
    0.11 made the LSP and completion plugins unnecessary anyway. What is here
    starts instantly and does the job. If you want more, ~/.vimrc is yours.
 GUIDE
+    cat > "$_g/kate.txt" <<'GUIDE'
+KATE -- a graphical IDE that needed almost no configuring
+
+   Kate is a KDE editor, and Copal sets it up as an IDE. The surprising part
+   is how little that took, which is worth explaining because it tells you
+   where to look when something is wrong.
+
+ ---------------------------------------------------------------------------
+ 1. THE LSP CLIENT IS ALREADY ON
+ ---------------------------------------------------------------------------
+
+   Kate's language server support is not a plugin to find and install. It
+   ships inside kate-common as lspclientplugin.so, and Kate loads it by
+   default. Kate also carries its own list of sixty-odd servers with the
+   commands to start them -- and all six that Copal installs are on it.
+
+   So on a machine with clangd installed, opening a .c file and pressing
+   Ctrl-click on a function name works, with nothing configured at all.
+
+   Turn it off or back on at:
+
+      Settings -> Configure Kate -> Plugins -> LSP Client
+
+ ---------------------------------------------------------------------------
+ 2. WHAT COPAL CHANGED
+ ---------------------------------------------------------------------------
+
+   Two files, and only two:
+
+      ~/.config/katerc
+          Pins the LSP Client and Project plugins on. They are already Kate's
+          defaults; pinning them means a future release changing its mind
+          does not quietly take your IDE away.
+
+      ~/.config/kate/lspclient/settings.json
+          One server: clangd. Kate merges this over its own defaults, so the
+          other sixty are untouched.
+
+   Why clangd. Kate starts it one way and Copal's nvim config starts it
+   another -- with --clang-tidy, and looking for compile_commands.json, a
+   Makefile or .git to decide where the project begins. Two editors open on
+   the same file disagreeing about where the project starts is a bad
+   afternoon, so Kate is told what nvim already believes.
+
+   Both files are yours now. Nothing regenerates them.
+
+ ---------------------------------------------------------------------------
+ 3. WHAT YOU GET
+ ---------------------------------------------------------------------------
+
+   From the LSP Client menu, or by right-clicking in the text:
+
+      Go to Definition          Go to Declaration
+      Go to Type Definition     Find Implementations
+      Find References           Rename
+      Code Action               Format
+      Expand Macro              Expand Selection
+
+   Plus a symbol outline down the side, inlay hints, and diagnostics
+   underlined as you type.
+
+   NO CALL HIERARCHY. Kate's LSP client has no 'who calls this function',
+   and neither does Emacs's Eglot. nvim does, on \ci and \co. If tracing a
+   call chain is the thing you do most, that is a real reason to keep nvim
+   open beside this.
+
+ ---------------------------------------------------------------------------
+ 4. IT WANTS A PROJECT
+ ---------------------------------------------------------------------------
+
+   Kate's LSP and its Project plugin both work out where a project starts
+   before a server is much use. The easy answer is a git repository -- 'git
+   init' in the folder is enough. Otherwise write a .kateproject file:
+
+      { "name": "hello", "files": [ { "git": 1 } ] }
+
+   Without either, a server still starts, but it sees one file rather than
+   your tree, and 'find references' finds very little.
+
+ ---------------------------------------------------------------------------
+ 5. WHAT IT COSTS
+ ---------------------------------------------------------------------------
+
+   About 590 MB installed, and 185 packages, because it brings Qt 6 and KDE
+   Frameworks 6 with it. On a 64-bit board with a real disk that is fine. It
+   is NOT built for ARMv6 at all, so on a Zero, Zero W, Pi 1 or CM1 the
+   answer is nvim or emacs.
+
+   For comparison: emacs is about 170 MB, geany about 79 MB, nvim about 27 MB,
+   and kdevelop about a gigabyte.
+
+   See also:  copal-guide ide      the whole build-and-debug loop
+              copal-guide emacs    the other graphical one, on every board
+GUIDE
+    note "$_g/kate.txt"
+
+    cat > "$_g/emacs.txt" <<'GUIDE'
+EMACS -- an IDE with nothing installed
+
+   Copal configures Emacs as an IDE using Eglot, and installs no packages to
+   do it. No MELPA, no package.el, no lsp-mode, no company, and nothing that
+   compiles on first launch.
+
+   That is not minimalism for its own sake. Eglot has been part of Emacs since
+   version 29 and Alpine ships 30.2, so the LSP client is already on the
+   machine the moment emacs is. The usual Emacs LSP setup is solving a problem
+   this editor no longer has -- the same argument the nvim config makes about
+   nvim-lspconfig, and it lands harder here.
+
+   It is also why Emacs is the one graphical IDE Copal can offer everywhere.
+   Kate needs Qt and KDE Frameworks and is not built for ARMv6; Emacs is built
+   for every architecture Copal targets, Zeros included.
+
+ ---------------------------------------------------------------------------
+ 1. RUNNING IT
+ ---------------------------------------------------------------------------
+
+      emacs file.c        in a window
+      emacs -nw file.c    in this terminal, same editor, same keys
+
+   Copal installs the windowed build on purpose: 'emacs -nw' gives you the
+   terminal one from it, so one package covers both. (emacs-nox cannot do the
+   reverse, and apk will not have both installed at once.)
+
+   To leave:  C-x C-c        To cancel anything half-typed:  C-g
+   C-x means hold Ctrl and press x. M-x means Alt (or Esc) then x.
+
+ ---------------------------------------------------------------------------
+ 2. THE KEYS COPAL BINDS
+ ---------------------------------------------------------------------------
+
+   A server starts on its own when you open a file it handles, so long as its
+   binary is installed. Then:
+
+      M-.        go to definition            M-?    find references
+      C-c D      go to declaration           C-c m  find implementation
+      C-c t      go to type definition
+      C-c h      hover documentation         C-c r  rename everywhere
+      C-c a      code action / quick fix     C-c f  format the buffer
+      C-c d      every diagnostic, in a list
+      M-n / M-p  next / previous diagnostic
+      C-c l      which servers are installed, and which is attached here
+
+   M-, goes back where M-. took you from. That one is worth learning first.
+
+   C-c l is the question to ask when go-to-definition does nothing: it says
+   what is installed and what is attached to this buffer, which is almost
+   always where the answer is.
+
+   NO CALL HIERARCHY. 'Who calls this function' does not exist in Eglot as
+   shipped in Emacs 30.2, nor in Kate. nvim has it on \ci and \co. Getting it
+   here means installing a package, and this config installs none -- M-? and
+   'grep -rn' cover most of the same ground.
+
+ ---------------------------------------------------------------------------
+ 3. WHERE THE CONFIGURATION IS
+ ---------------------------------------------------------------------------
+
+   ~/.emacs.d/init.el, generated once by copal-init.sh and never regenerated.
+   It is yours -- edit it freely.
+
+   The server list in it comes from the same table inside copal-init.sh that
+   feeds nvim and Kate, so all three editors agree about which servers exist
+   and how to start them.
+
+   Every server is wired up with a runtime check, not an install-time one:
+
+      (when (executable-find "gopls") ...)
+
+   So installing a language server later needs no reconfiguration here. Start
+   Emacs again and it is used.
+
+ ---------------------------------------------------------------------------
+ 4. IF NOTHING HAPPENS
+ ---------------------------------------------------------------------------
+
+      C-c l              is a server installed? is one attached?
+      M-x eglot          start one by hand in this buffer
+      M-x eglot-events-buffer    what the editor and the server said
+      M-x eglot-shutdown         stop it and let it start again
+
+   Eglot needs a project to decide the root, and its idea of a project is
+   usually a git repository. 'git init' in the folder is the quickest fix
+   when references come back empty.
+
+   Install the servers themselves from the menu: Super+C, then Devtools or
+   Languages -- or 'apk add clangd rust-analyzer gopls py3-lsp-server'.
+
+   See also:  copal-guide ide     the whole build-and-debug loop
+              copal-guide kate    the other graphical one, 64-bit and ARMv7
+GUIDE
+    note "$_g/emacs.txt"
+
     note "$_g/ide.txt"
     note "$_g/nvim.txt"
 }
@@ -8090,6 +8308,102 @@ MSG
     fi
 }
 
+# ---------------------------------------------------------------------------
+# THE LANGUAGE SERVERS, once.
+#
+# Three editors here speak LSP -- Neovim, Kate and Emacs -- and each wants the
+# same six facts written in a different syntax: Lua, JSON, elisp. Writing that
+# list three times would mean three places to add a server and two of them to
+# forget, so it is written here and the emitters below read it.
+#
+# One row per server:
+#
+#   name       what the editor calls it. Neovim's key, and the label in reports
+#   binary     the executable. Also what every editor tests for at RUNTIME --
+#              never at install time, so one config stays correct as packages
+#              come and go
+#   cmd        the command and its flags, space separated
+#   filetypes  Neovim filetypes, comma separated
+#   roots      root markers, comma separated. compile_commands.json is what
+#              tells clangd your include paths and standard -- 'bear -- make'
+#              generates one, and without it clangd guesses
+#   kate       Kate's key for the same server in its built-in settings.json.
+#              Kate ships defaults for all six, so this names what we would be
+#              overriding rather than what we have to supply
+#   emacs      major modes, comma separated. '-hook' is appended to each
+#
+# Adding a server is one row. Removing one is deleting it.
+lsp_catalogue() {
+    cat <<'LSPCAT'
+clangd|clangd|clangd --background-index --clang-tidy|c,cpp,objc,objcpp|compile_commands.json,.git,Makefile|c|c-mode,c-ts-mode,c++-mode,c++-ts-mode,objc-mode
+rust_analyzer|rust-analyzer|rust-analyzer|rust|Cargo.toml,.git|rust|rust-mode,rust-ts-mode
+gopls|gopls|gopls|go,gomod,gowork|go.work,go.mod,.git|go|go-mode,go-ts-mode
+pylsp|pylsp|pylsp|python|pyproject.toml,setup.py,.git|python|python-mode,python-ts-mode
+luals|lua-language-server|lua-language-server|lua|.luarc.json,.git|lua|lua-mode,lua-ts-mode
+hls|haskell-language-server-wrapper|haskell-language-server-wrapper --lsp|haskell,lhaskell|*.cabal,stack.yaml,.git|haskell|haskell-mode
+LSPCAT
+}
+
+# "a b c" -> "'a', 'b', 'c'".  $2 is the separator in the input.
+#
+# printf '%s\n' and not printf '%s'. Without the newline the last field
+# reaches `read` with no line terminator, read returns non-zero at EOF, and
+# the loop exits BEFORE running its body on it -- so every list quietly loses
+# its last element, and a one-element list comes out empty. It is a two
+# character bug that produces plausible-looking output, which is the kind
+# worth a comment.
+lsp_quote_list() {
+    printf '%s\n' "$1" | tr "$2" '\n' | while read -r _item; do
+        [ -n "$_item" ] && printf "'%s', " "$_item"
+    done | sed 's/, $//'
+}
+
+# The same, with double quotes and no commas, which is how elisp wants it.
+lsp_quote_elisp() {
+    printf '%s\n' "$1" | tr "$2" '\n' | while read -r _item; do
+        [ -n "$_item" ] && printf '"%s" ' "$_item"
+    done | sed 's/ $//'
+}
+
+# And with double quotes AND commas, which is how JSON wants it.
+lsp_quote_json() {
+    printf '%s\n' "$1" | tr "$2" '\n' | while read -r _item; do
+        [ -n "$_item" ] && printf '"%s", ' "$_item"
+    done | sed 's/, $//'
+}
+
+# The Lua half of the Neovim config: the servers table, generated.
+lsp_emit_nvim_servers() {
+    printf 'local servers = {\n'
+    lsp_catalogue | while IFS='|' read -r _n _bin _cmd _ft _roots _kate _emacs; do
+        [ -n "$_n" ] || continue
+        printf '  %s = {\n' "$_n"
+        printf '    cmd = { %s },\n'           "$(lsp_quote_list "$_cmd" ' ')"
+        printf '    filetypes = { %s },\n'     "$(lsp_quote_list "$_ft" ',')"
+        printf '    root_markers = { %s },\n'  "$(lsp_quote_list "$_roots" ',')"
+        printf '  },\n'
+    done
+    printf '}\n'
+}
+
+# Which of them this machine actually has. Used for the report at the end of
+# every editor's configuration, so all three say the same thing.
+#
+# `if` rather than the shorter `command -v ... && printf`, and that is not a
+# style choice. copal-init.sh runs under `set -eu`; a while loop reports the
+# status of the last command its body ran, and `test && printf` reports failure
+# when the test is false. So with the plain form, a machine whose LAST table
+# row is missing -- haskell-language-server, which is 64-bit only and absent
+# from most boards -- makes this function "fail" and `set -e` ends stage 7 on
+# a perfectly healthy install. An `if` with no else is zero when it does
+# nothing, which is the property needed here.
+lsp_present() {
+    lsp_catalogue | while IFS='|' read -r _n _bin _rest; do
+        [ -n "$_bin" ] || continue
+        if command -v "$_bin" >/dev/null 2>&1; then printf ' %s' "$_bin"; fi
+    done
+}
+
 # Neovim as an IDE, with no plugin manager and no plugins.
 #
 # This is the part that would normally mean LazyVim, Mason, nvim-lspconfig,
@@ -8131,41 +8445,12 @@ if vim.fn.has('nvim-0.11') == 0 then
 end
 
 -- One table, one entry per language server. 'cmd[1]' is also the executable
--- checked for, so adding a server is one line and removing one is deleting it.
-local servers = {
-  clangd = {
-    cmd = { 'clangd', '--background-index', '--clang-tidy' },
-    filetypes = { 'c', 'cpp', 'objc', 'objcpp' },
-    -- compile_commands.json is what tells clangd your include paths and
-    -- standard. 'bear -- make' generates one; without it clangd guesses.
-    root_markers = { 'compile_commands.json', '.git', 'Makefile' },
-  },
-  rust_analyzer = {
-    cmd = { 'rust-analyzer' },
-    filetypes = { 'rust' },
-    root_markers = { 'Cargo.toml', '.git' },
-  },
-  gopls = {
-    cmd = { 'gopls' },
-    filetypes = { 'go', 'gomod', 'gowork' },
-    root_markers = { 'go.work', 'go.mod', '.git' },
-  },
-  pylsp = {
-    cmd = { 'pylsp' },
-    filetypes = { 'python' },
-    root_markers = { 'pyproject.toml', 'setup.py', '.git' },
-  },
-  luals = {
-    cmd = { 'lua-language-server' },
-    filetypes = { 'lua' },
-    root_markers = { '.luarc.json', '.git' },
-  },
-  hls = {
-    cmd = { 'haskell-language-server-wrapper', '--lsp' },
-    filetypes = { 'haskell', 'lhaskell' },
-    root_markers = { '*.cabal', 'stack.yaml', '.git' },
-  },
-}
+-- checked for. The table is generated from lsp_catalogue() in copal-init.sh,
+-- which is also where Kate's and Emacs's copies come from -- so adding a
+-- server is one row there and all three editors learn about it.
+LSPLUA
+    lsp_emit_nvim_servers >> /tmp/lsp.lua.$$
+    cat >> /tmp/lsp.lua.$$ <<'LSPLUA'
 
 local enabled = {}
 for name, cfg in pairs(servers) do
@@ -8249,11 +8534,7 @@ LSPLUA
     install_home_file .config/nvim/lsp.lua /tmp/lsp.lua.$$
     rm -f /tmp/lsp.lua.$$
 
-    _have=''
-    for _s in clangd rust-analyzer gopls pylsp lua-language-server \
-              haskell-language-server-wrapper; do
-        command -v "$_s" >/dev/null 2>&1 && _have="$_have $_s"
-    done
+    _have=$(lsp_present)
     if [ -n "$_have" ]; then
         note "language servers present:$_have"
     else
@@ -8261,6 +8542,235 @@ LSPLUA
         note "Install them from the menu: Devtools, or 'apk add clangd rust-analyzer gopls'"
     fi
     note "In nvim, :Lsp says which servers are enabled and attached."
+}
+
+# Kate as an IDE.
+#
+# Less to do here than it looks, and the reason is worth writing down so nobody
+# adds it back later. Kate's LSP client is not a plugin you have to find and
+# install: lspclientplugin.so ships inside kate-common, and it is in Kate's own
+# defaultPlugins list, so it loads on first start with nothing configured. Kate
+# also ships settings.json with sixty-odd servers already described -- and all
+# six of ours are among them, with the right commands.
+#
+# So this writes exactly two things:
+#
+#   katerc              pins the two plugins we depend on. They are already
+#                       Kate's defaults; pinning them means a future release
+#                       that changes its mind does not silently take LSP away.
+#   lspclient/settings  the ONE server where Copal and Kate disagree.
+#
+# That disagreement is clangd. Kate runs it with --limit-results and
+# --completion-style; Copal's Neovim config runs it with --clang-tidy and looks
+# for compile_commands.json, Makefile or .git to decide where the project
+# starts. Two editors open on the same file, disagreeing about the project
+# root, is the kind of thing that costs an afternoon -- so Kate is told what
+# Neovim already believes. Kate merges user settings over its defaults, so
+# naming 'c' overrides that one entry and leaves the other sixty alone.
+dev_write_kate_config() {
+    command -v kate >/dev/null 2>&1 || return 0
+    # Written once and then left alone. This runs from stage 7 AND stage 12
+    # (see below), and the second visit must not overwrite a file somebody has
+    # since edited -- the guides promise nothing regenerates these.
+    if [ -f "$(user_home)/.config/kate/lspclient/settings.json" ]; then
+        note "Kate is already configured -- leaving it alone"
+        return 0
+    fi
+    say "Configuring Kate as an IDE (LSP client, no plugins to install)"
+
+    cat > /tmp/katerc.$$ <<'KATERC'
+# Generated by copal-init.sh. Kate rewrites this file when it exits, which is
+# fine -- everything here is a starting position, not a setting to defend.
+[Kate Plugins]
+lspclientplugin=true
+kateprojectplugin=true
+
+[General]
+Show Menu Bar=true
+Show Status Bar=true
+KATERC
+    install_home_file .config/katerc /tmp/katerc.$$
+    rm -f /tmp/katerc.$$
+
+    # The clangd row, read out of the same table Neovim's config comes from.
+    # grep and cut rather than a read loop, because a loop whose condition is
+    # false on its last iteration exits non-zero and `set -e` would end the
+    # stage here. `|| true` for the same reason, if the row is ever removed.
+    _krow=$(lsp_catalogue | grep '^clangd|' || true)
+    _kcmd=$(lsp_quote_json "$(printf '%s' "$_krow" | cut -d'|' -f3)" ' ')
+    _kroot=$(lsp_quote_json "$(printf '%s' "$_krow" | cut -d'|' -f5)" ',')
+
+    # The regex is Kate's own, copied from its defaults: C++ is a separate
+    # entry that inherits this one with "use": "c", so getting this wrong would
+    # take both languages down rather than one.
+    cat > /tmp/kate-lsp.$$ <<KATELSP
+{
+    "servers": {
+        "c": {
+            "command": [$_kcmd],
+            "rootIndicationFileNames": [$_kroot],
+            "highlightingModeRegex": "^(C|ANSI C89|Objective-C)\$"
+        }
+    }
+}
+KATELSP
+    install_home_file .config/kate/lspclient/settings.json /tmp/kate-lsp.$$
+    rm -f /tmp/kate-lsp.$$
+
+    note "Kate: LSP is on by default -- Settings -> Configure Kate -> LSP Client"
+    note "The project side wants a git repository or a .kateproject file to find the root."
+    _have=$(lsp_present)
+    [ -n "$_have" ] && note "servers Kate will find:$_have" \
+        || warn "no language servers installed -- Kate will edit, but not navigate"
+}
+
+# Emacs as an IDE, with nothing installed.
+#
+# This is the same argument the Neovim config makes, and it lands harder here.
+# The usual Emacs LSP story is straight-through-package.el: MELPA, lsp-mode,
+# company, treemacs, and a first launch that compiles for a while. None of that
+# is here, because Eglot has been IN Emacs since 29 and Alpine ships 30.2. The
+# LSP client is already on the machine the moment emacs is; there is no package
+# manager in this config and nothing to build on first start.
+#
+# Which is also why Emacs is the editor this project can offer everywhere.
+# Kate needs Qt and KDE Frameworks and is not built for ARMv6 at all; Emacs is
+# built for every architecture Copal targets, Zeros included. If only one
+# graphical IDE can exist on a board, on the small boards it is this one.
+#
+# emacs-x11 rather than emacs-nox on purpose: it is the same editor and
+# 'emacs -nw' still runs it in the terminal, so the windowed build is the one
+# that can do both. They conflict in apk, so only one of them can be offered.
+dev_write_emacs_config() {
+    command -v emacs >/dev/null 2>&1 || return 0
+    # As above: written once, then it is yours.
+    if [ -f "$(user_home)/.emacs.d/init.el" ]; then
+        note "Emacs is already configured -- leaving it alone"
+        return 0
+    fi
+    say "Configuring Emacs as an IDE (Eglot, built in -- no packages)"
+
+    cat > /tmp/initel.$$ <<'INITEL'
+;;; init.el --- Generated by copal-init.sh.  -*- lexical-binding: t; -*-
+;;
+;; Emacs as an IDE with no packages installed, using Eglot -- which has been
+;; part of Emacs since 29 and needs no package manager, no MELPA, and no
+;; compilation on first launch.
+;;
+;; Edit freely: nothing regenerates this file after the install.
+
+(when (version< emacs-version "29")
+  (message "Copal: Eglot needs Emacs 29 or later -- skipping the LSP setup."))
+
+(unless (version< emacs-version "29")
+  (require 'eglot)
+
+  ;; Shut a server down when its last buffer closes. Without this a long
+  ;; session accumulates rust-analyzer processes, which a Pi notices.
+  (setq eglot-autoshutdown t)
+  ;; Eglot's default is to ask before touching a file the server wants to edit
+  ;; during a rename. On a small screen that dialogue is the slow part.
+  (setq eglot-confirm-server-edits nil)
+
+INITEL
+
+    # The server overrides and the auto-start hooks, from the shared table.
+    # Only rows whose binary is missing are skipped -- at RUNTIME, by
+    # executable-find, so installing a server later needs no reconfiguration.
+    lsp_catalogue | while IFS='|' read -r _n _bin _cmd _ft _roots _kate _emacs; do
+        [ -n "$_n" ] || continue
+        _modes=$(lsp_quote_elisp "$_emacs" ',' | tr -d '"')
+        _hooks=$(printf '%s\n' "$_modes" | tr ' ' '\n' | while read -r _m; do
+                     [ -n "$_m" ] && printf '%s-hook ' "$_m"
+                 done | sed 's/ $//')
+        {
+            printf '  ;; %s\n' "$_n"
+            printf '  (add-to-list %s-server-programs\n' "'eglot"
+            printf "               '((%s) . (%s)))\n" "$_modes" "$(lsp_quote_elisp "$_cmd" ' ')"
+            printf '  (when (executable-find "%s")\n' "$_bin"
+            printf "    (dolist (h '(%s)) (add-hook h #'eglot-ensure)))\n\n" "$_hooks"
+        } >> /tmp/initel.$$
+    done
+
+    cat >> /tmp/initel.$$ <<'INITEL'
+  ;; The keys. Deliberately close to what the Neovim config binds, so the two
+  ;; editors are not two sets of muscle memory:
+  ;;
+  ;;   M-.  / M-?    definition / references      (xref, built in)
+  ;;   C-c D         declaration
+  ;;   C-c m         implementation
+  ;;   C-c t         type definition
+  ;;   C-c h         hover documentation
+  ;;   C-c r         rename everywhere
+  ;;   C-c a         code action / quick fix
+  ;;   C-c f         format buffer
+  ;;   C-c d         every diagnostic, in a list
+  ;;   M-n  / M-p    next / previous diagnostic
+  ;;   C-c l         which servers are running here
+  ;;
+  ;; THE ONE THING MISSING, and it is worth knowing before you choose this
+  ;; editor: there is no call hierarchy here. "Who calls this function" is the
+  ;; navigation people miss most when they leave a graphical IDE, and Eglot as
+  ;; shipped in Emacs 30.2 has no command for it -- nor does Kate's LSP client.
+  ;; Of the three editors Copal configures, only Neovim has it, on <leader>ci
+  ;; and <leader>co. Getting it here means a package, and this config installs
+  ;; none. 'grep -rn' and M-? cover most of the same ground.
+  (with-eval-after-load 'eglot
+    (define-key eglot-mode-map (kbd "C-c D") #'eglot-find-declaration)
+    (define-key eglot-mode-map (kbd "C-c m") #'eglot-find-implementation)
+    (define-key eglot-mode-map (kbd "C-c t") #'eglot-find-typeDefinition)
+    (define-key eglot-mode-map (kbd "C-c h") #'eldoc)
+    (define-key eglot-mode-map (kbd "C-c r") #'eglot-rename)
+    (define-key eglot-mode-map (kbd "C-c a") #'eglot-code-actions)
+    (define-key eglot-mode-map (kbd "C-c f") #'eglot-format)
+    (define-key eglot-mode-map (kbd "C-c d") #'flymake-show-buffer-diagnostics)
+    (define-key eglot-mode-map (kbd "M-n")   #'flymake-goto-next-error)
+    (define-key eglot-mode-map (kbd "M-p")   #'flymake-goto-prev-error)
+    (define-key eglot-mode-map (kbd "C-c l") #'copal-lsp-status))
+
+  ;; The :Lsp of this editor -- the first question when go-to-definition does
+  ;; nothing is which server, if any, is actually attached.
+  (defun copal-lsp-status ()
+    "Say which language servers are installed, and which is attached here."
+    (interactive)
+    (let ((found (seq-filter #'executable-find copal-lsp-binaries))
+          (here  (and (fboundp 'eglot-current-server)
+                      (eglot-current-server))))
+      (message "installed: %s | attached here: %s"
+               (if found (string-join found ", ") "none")
+               (if here (eglot-project-nickname here) "none"))))
+
+  ;; Sensible for reading code, and cheap enough for a Pi.
+  (show-paren-mode 1)
+  (column-number-mode 1)
+  (electric-pair-mode 1)
+  (setq-default indent-tabs-mode nil)
+  ;; Backups in one place rather than beside every file being edited.
+  (setq backup-directory-alist '(("." . "~/.emacs.d/backups")))
+  (setq create-lockfiles nil))
+INITEL
+
+    # The binary list copal-lsp-status reports on, from the same table again.
+    {
+        printf '\n;; Generated from lsp_catalogue() in copal-init.sh. After the block\n'
+        printf ';; above rather than before it only because that block is a fixed\n'
+        printf ';; heredoc and this list is not; copal-lsp-status does not read the\n'
+        printf ';; variable until you call it, by which time this has run.\n'
+        printf '(defvar copal-lsp-binaries (list %s)\n' \
+               "$(lsp_catalogue | while IFS='|' read -r _n _bin _rest; do
+                      [ -n "$_bin" ] && printf '"%s" ' "$_bin"
+                  done | sed 's/ $//')"
+        printf '  "Every language server Copal knows how to install.")\n'
+    } >> /tmp/initel.$$
+
+    install_home_file .emacs.d/init.el /tmp/initel.$$
+    rm -f /tmp/initel.$$
+
+    note "Emacs: C-c l says which servers are installed and attached"
+    note "'emacs -nw' runs the same editor in this terminal, with the same keys."
+    _have=$(lsp_present)
+    [ -n "$_have" ] && note "servers Emacs will find:$_have" \
+        || warn "no language servers installed -- Emacs will edit, but not navigate"
 }
 
 # Xdebug ships switched off -- loading it unconditionally slows every PHP
@@ -8571,6 +9081,8 @@ INITVIM
     rm -f /tmp/vimrc.$$ /tmp/initvim.$$
 
     dev_write_lsp_config
+    dev_write_kate_config
+    dev_write_emacs_config
     dev_write_php_config
     dev_install_terminals
     dev_write_morse
@@ -10058,6 +10570,16 @@ MSG
     # add_optional one at a time rather than in one apk call: on a board this
     # slow a single failed name should not throw away twenty good ones.
     for _p in $_want; do add_optional "$_p"; done
+
+    # Kate and Emacs are catalogue entries, so they arrive HERE -- at stage 12
+    # -- and stage 7 has long since run and found no binary to configure. In a
+    # full-automatic install that gap is the whole distance between "installed"
+    # and "set up as an IDE": stage 7 is hours earlier and cannot know what
+    # this stage is about to add. So ask again now. Both writers return
+    # immediately if the editor is absent, and leave an existing config alone
+    # if it is already there, which makes calling them twice free and safe.
+    dev_write_kate_config
+    dev_write_emacs_config
 
     say "Done"
     note "Open the menu (Super+z) -- everything installed now appears in it,"
