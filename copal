@@ -1,0 +1,465 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 paulr@sdf.org
+#
+#  COPAL ALPINE LINUX -- the front door.
+#
+# copal-prep.sh is 11,720 lines and its first question is "what is this card
+# for?", asked with no context at all. That is the wrong first thing to see.
+# Someone arriving here needs to know what they are about to start, what it
+# will cost them in time and hardware, and where it ends -- BEFORE they pick a
+# number and a script starts erasing a disk.
+#
+# So this is the front door: a flow chart, a target menu, and a per-target
+# briefing covering equipment, CPU, minimum requirements and expected use.
+# It writes nothing and touches no disk. Every path out of it ends in an
+# explicit "Begin" that names the script it is about to hand over to.
+#
+# Usage:  ./copal                 the menu
+#         ./copal --flow          print the flow chart and exit
+#         ./copal --check         check what THIS Mac can build, and exit
+#         ./copal --targets       list the targets, one per line, and exit
+set -eu
+
+HERE="$(cd "$(dirname "$0")" && pwd)"
+PREP="$HERE/copal-prep.sh"
+
+B='\033[1m'; D='\033[2m'; C='\033[36m'; G='\033[32m'; Y='\033[33m'; R='\033[31m'; Z='\033[0m'
+[ -t 1 ] || { B=''; D=''; C=''; G=''; Y=''; R=''; Z=''; }
+
+say()  { printf '%b\n' "$*"; }
+rule() { say "${D}────────────────────────────────────────────────────────────────────${Z}"; }
+pause() {
+    printf '%b' "\n${G}Press Enter to continue${Z}${D} (Ctrl-C to quit)${Z} "
+    read -r _ </dev/tty || exit 130
+}
+
+banner() {
+    say ""
+    say "${Y} ██████  ██████  ██████   █████  ██${Z}"
+    say "${Y}██      ██    ██ ██   ██ ██   ██ ██${Z}"
+    say "${Y}██      ██    ██ ██████  ███████ ██${Z}"
+    say "${Y}██      ██    ██ ██      ██   ██ ██${Z}"
+    say "${Y} ██████  ██████  ██████  ██   ██ ███████${Z}"
+    say ""
+    say "${B}copal-alpine-linux${Z} -- one Alpine installer, many targets."
+    say "${D}Tree resin caught halfway to amber: hardened, but not yet stone.${Z}"
+}
+
+# --------------------------------------------------------------- flow chart ---
+# The whole journey on one screen. Deliberately medium-agnostic: the left
+# column is always this Mac, the right column is always the machine being
+# built, and the only thing that changes between targets is what sits in the
+# middle. Someone who reads this knows what they are signing up for.
+flow() {
+    say ""
+    say "${B}THE PROCESS, BEGINNING TO END${Z}"
+    rule
+    say ""
+    say "  ${C}ON THIS MAC${Z}                          ${C}ON THE MACHINE YOU ARE BUILDING${Z}"
+    say "  ${D}(nothing is erased until step 3)${Z}      ${D}(Alpine, running from RAM at first)${Z}"
+    say ""
+    say "  ${B}1${Z} Choose a target ${D}............${Z} you are here"
+    say "     ${D}board, PC or VM -- this decides the CPU and the bootloader${Z}"
+    say "     ${D}|${Z}"
+    say "  ${B}2${Z} Download Alpine"
+    say "     ${D}~70-390 MB, SHA256 verified. A bad download is refused,${Z}"
+    say "     ${D}never written.${Z}"
+    say "     ${D}|${Z}"
+    say "  ${B}3${Z} Prepare the medium ${G}<- first destructive step${Z}"
+    say "     ${D}MBR: FAT32 boot partition + a slot for the Linux root.${Z}"
+    say "     ${D}A card is erased here. A disk image or VM costs nothing.${Z}"
+    say "     ${D}|${Z}"
+    say "  ${B}4${Z} Copy the payload"
+    say "     ${D}Copied as FILES, never written as a block image.${Z}"
+    say "     ${D}|${Z}"
+    say "  ${B}5${Z} Write the installer"
+    say "     ${D}copal-init.sh + your answers land on the boot partition.${Z}"
+    say "     ${D}|${Z}"
+    say "     ${D}+------------- boot the target -------------+${Z}"
+    say "                                          ${D}|${Z}"
+    say "                                       ${B}6${Z} Stage 1  base config, password"
+    say "                                          ${D}|${Z}"
+    say "                                       ${B}7${Z} Stage 2  ext4 filesystem"
+    say "                                          ${D}|${Z}"
+    say "                                       ${B}8${Z} Stage 3  move / onto disk ${Y}(reboots)${Z}"
+    say "                                          ${D}   until here the root is a tmpfs${Z}"
+    say "                                          ${D}   that evaporates at power-off${Z}"
+    say "                                          ${D}|${Z}"
+    say "                                       ${B}9${Z} Stage 4  ${G}X.Org + i3 -- the desktop${Z}"
+    say "                                          ${D}|${Z}"
+    say "                                      ${B}10${Z} Stages 5-15 ${D}all optional,${Z}"
+    say "                                          ${D}   all re-runnable: zram, SSH,${Z}"
+    say "                                          ${D}   toolchain, 316 apps, emulators${Z}"
+    say ""
+    rule
+    say "  ${D}Steps 1-5 are this script. Steps 6-10 run on the target itself,${Z}"
+    say "  ${D}from a menu -- one at a time, or 'copal --auto' for all of them.${Z}"
+    say "  ${D}macOS cannot create ext4, which is why the split falls here.${Z}"
+    say ""
+}
+
+# ------------------------------------------------------------- the targets ---
+# key | menu label | arch | one-line use case
+targets() {
+    cat <<'TABLE'
+zero |Pi Zero / Zero W / Pi 1 / CM1|armhf  |The original target. 512 MB, single core, no browser but BadWolf
+pi2b |Pi 2 B v1.1                  |armv7  |The only 32-bit quad-core Pi. Rare; check /proc/cpuinfo first
+zero2|Pi Zero 2 W / Pi 3 / CM3     |aarch64|64-bit in the same footprint. Firefox and Chromium both build
+pi4  |Pi 4 / 400 / CM4             |aarch64|Enough RAM to be a real desktop. The comfortable Pi
+pi5  |Pi 5                         |aarch64|Fastest Pi. NVMe over PCIe if you have the hat
+pc   |PC / laptop / Intel Mac      |x86_64 |Any UEFI machine since roughly 2012. Revives old hardware
+pc32 |PC, 32-bit UEFI              |x86    |Early-2010s Atom netbooks and some Bay Trail tablets
+vm   |UTM on Apple Silicon         |aarch64|A VM on THIS Mac at native speed. No card, no reboot cycle
+vmx86|UTM x86_64 on Apple Silicon  |x86_64 |Emulated. Verifies the PC path without a spare PC
+TABLE
+}
+
+target_key()   { targets | sed -n "${1}p" | cut -d'|' -f1 | tr -d ' '; }
+target_label() { targets | sed -n "${1}p" | cut -d'|' -f2 | sed 's/ *$//'; }
+target_arch()  { targets | sed -n "${1}p" | cut -d'|' -f3 | tr -d ' '; }
+target_use()   { targets | sed -n "${1}p" | cut -d'|' -f4; }
+
+# Which targets are actually buildable today. vmx86 is the one Phase 1 adds:
+# MODEL=vm implies aarch64, and the VM GRUB config hardcodes console=ttyAMA0,
+# which is the ARM PL011 and does not exist on x86. Saying so here is better
+# than letting someone build a VM that boots to a console nobody can see.
+target_ready() {
+    case "$1" in
+        vmx86) return 1 ;;
+        *)     return 0 ;;
+    esac
+}
+
+menu() {
+    say ""
+    say "${B}CHOOSE A TARGET${Z}"
+    rule
+    say "  ${D}The architecture is not a preference. Getting it wrong is not a${Z}"
+    say "  ${D}degraded system -- it is a machine that stops dead at boot.${Z}"
+    say ""
+    say "  ${C}Raspberry Pi${Z} ${D}-- SD card, booted by the GPU firmware${Z}"
+    i=1
+    while [ "$i" -le 9 ]; do
+        [ "$i" = 6 ] && { say ""; say "  ${C}PC${Z} ${D}-- UEFI only. Legacy BIOS is not supported; see 'w' below${Z}"; }
+        [ "$i" = 8 ] && { say ""; say "  ${C}Virtual machine${Z} ${D}-- UTM on this Mac, no hardware at all${Z}"; }
+        k=$(target_key "$i")
+        if target_ready "$k"; then
+            printf '    %b%d%b) %-30s %-8s %b%s%b\n' "$B" "$i" "$Z" \
+                "$(target_label "$i")" "$(target_arch "$i")" "$D" "$(target_use "$i")" "$Z"
+        else
+            printf '    %b%d) %-30s %-8s %s -- NOT YET BUILT%b\n' "$D" "$i" \
+                "$(target_label "$i")" "$(target_arch "$i")" "$(target_use "$i")" "$Z"
+        fi
+        i=$((i + 1))
+    done
+    say ""
+    say "  ${B}f${Z}) Show the flow chart again"
+    say "  ${B}r${Z}) What can this Mac build?  ${D}(requirements check -- writes nothing)${Z}"
+    say "  ${B}w${Z}) Why UEFI only, and other things worth knowing first"
+    say "  ${B}q${Z}) Quit"
+    say ""
+}
+
+# ------------------------------------------------------- per-target detail ---
+# Equipment, CPU, minimum requirements, expected use. Shown BEFORE the handover,
+# because "8 GB card minimum" is useless information after the erase.
+detail() {
+    k="$1"
+    say ""
+    say "${B}$(printf '%s' "$2" | tr '[:lower:]' '[:upper:]')${Z}   ${D}${3}${Z}"
+    rule
+    case "$k" in
+    zero|pi2b|zero2|pi4|pi5)
+        case "$k" in
+        zero)  cpu="ARM1176JZF-S, 1 core @ 1 GHz (ARMv6)";  ram="512 MB, shared with the GPU" ;;
+        pi2b)  cpu="Cortex-A7, 4 cores @ 900 MHz (ARMv7)";  ram="1 GB" ;;
+        zero2) cpu="Cortex-A53, 4 cores @ 1 GHz (ARMv8)";   ram="512 MB (Zero 2 W) / 1 GB (Pi 3)" ;;
+        pi4)   cpu="Cortex-A72, 4 cores @ 1.5 GHz";         ram="1-8 GB, depending on model" ;;
+        pi5)   cpu="Cortex-A76, 4 cores @ 2.4 GHz";         ram="4-16 GB" ;;
+        esac
+        say ""
+        say "  ${C}Equipment you need${Z}"
+        say "    - The board itself, and a power supply that can actually feed it"
+        say "    - An SD card, ${B}8 GB minimum${Z}, 16 GB or more recommended"
+        say "    - A card reader on this Mac"
+        say "    - HDMI display and a USB keyboard, ${B}or${Z} a USB-serial adapter"
+        say "      ${D}on the GPIO header (enable_uart=1 is set for you)${Z}"
+        say "    - Network: Ethernet, or Wi-Fi credentials to type in at stage 1"
+        say ""
+        say "  ${C}CPU / RAM${Z}"
+        say "    ${cpu}"
+        say "    ${ram}"
+        say ""
+        say "  ${C}Minimum requirements${Z}"
+        say "    - 8 GB card ${D}(4 GB of it becomes the boot partition)${Z}"
+        say "    - ~1 GB free on this Mac for the download"
+        say "    - Your macOS password ${D}(fdisk needs sudo for the partition table)${Z}"
+        say ""
+        say "  ${C}Expected use case${Z}"
+        [ "$k" = zero ] && {
+        say "    A permanent, always-on little machine: SSH box, sensor logger,"
+        say "    print server, or a genuinely usable tiling desktop on hardware"
+        say "    most people have written off. No Firefox or Chromium exist for"
+        say "    ARMv6 anywhere -- BadWolf over WebKitGTK is the browser, and it"
+        say "    is a current engine with current TLS."; }
+        [ "$k" = pi2b ] && {
+        say "    The same as the Zero, with four cores. Check /proc/cpuinfo says"
+        say "    Cortex-A7 first: the v1.2 board is a Cortex-A53 and needs the"
+        say "    aarch64 target instead."; }
+        [ "$k" = zero2 ] && {
+        say "    The sweet spot. 64-bit means Firefox ESR and Chromium are both"
+        say "    packaged, the toolchain is complete, and the emulators run. Still"
+        say "    512 MB on a Zero 2 W, so stage 5 (zram) is the difference between"
+        say "    slow and unusable."; }
+        [ "$k" = pi4 ] && {
+        say "    A desktop you would actually sit at. Enough RAM for a browser and"
+        say "    an IDE at the same time. Boot from USB or NVMe if you would rather"
+        say "    not trust a card."; }
+        [ "$k" = pi5 ] && {
+        say "    The fastest thing this installer targets. Compiles the workshop"
+        say "    (Mini vMac, PianoBooster) in minutes rather than hours."; }
+        say ""
+        say "  ${Y}Time${Z}  ~10 min on this Mac, then 20 min to 2 h on the board"
+        say "        ${D}depending on how many of the fifteen stages you run${Z}"
+        ;;
+    pc|pc32)
+        say ""
+        say "  ${C}Equipment you need${Z}"
+        say "    - A PC, laptop or Intel Mac that boots ${B}UEFI${Z}"
+        say "    - An SD card or USB stick, ${B}8 GB minimum${Z}"
+        say "    - A way to tell the firmware to boot from it"
+        say "      ${D}(usually F12, F2, Esc or Option at power-on)${Z}"
+        say ""
+        say "  ${C}CPU${Z}"
+        [ "$k" = pc ] && say "    Any x86_64 with UEFI firmware -- roughly 2012 onward."
+        [ "$k" = pc ] && say "    Every Intel Mac qualifies."
+        [ "$k" = pc32 ] && say "    32-bit UEFI: early-2010s Atom netbooks, some Bay Trail"
+        [ "$k" = pc32 ] && say "    tablets. Unusual, and not the same as a 32-bit CPU."
+        say ""
+        say "  ${C}Minimum requirements${Z}"
+        say "    - 1 GB RAM to boot, 2 GB to run the desktop comfortably"
+        say "    - 8 GB card or stick"
+        say "    - ~400 MB free on this Mac ${D}(the netboot payload carries every"
+        say "      module, and the GRUB ISO is another 66 MB)${Z}"
+        say ""
+        say "  ${R}Legacy BIOS is not supported${Z}, and that is a limit of the"
+        say "  writing machine rather than a preference. A BIOS boot needs"
+        say "  syslinux or grub-install to write a boot sector, and both are"
+        say "  Linux tools that do not exist on macOS. There is no honest way"
+        say "  to fake it, so this refuses instead of writing a dead card."
+        say ""
+        say "  ${C}Expected use case${Z}"
+        say "    Bringing an old laptop back as something useful, with a system"
+        say "    that boots in seconds and does not grow. Same fifteen stages and"
+        say "    same 316-application catalogue as the Pi."
+        say ""
+        say "  ${Y}Time${Z}  ~10 min on this Mac, then 20 min to 2 h on the machine"
+        ;;
+    vm)
+        say ""
+        say "  ${C}Equipment you need${Z}"
+        say "    - This Mac. That is the entire list."
+        say "    - UTM ${D}(https://mac.getutm.app)${Z}, or QEMU from Homebrew"
+        say ""
+        say "  ${C}CPU${Z}"
+        say "    Apple Silicon, virtualised through HVF -- so the guest runs"
+        say "    aarch64 code ${B}natively${Z}, at full speed. Not emulation."
+        say ""
+        say "  ${C}Minimum requirements${Z}"
+        say "    - ~64 GB free disk ${D}(sparse: it costs only what is written,${Z}"
+        say "      ${D}realistically 10-15 GB for a full install)${Z}"
+        say "    - 6 GB RAM allotted to the VM"
+        say "    - No card, no reader, no password, nothing erased"
+        say ""
+        say "  ${C}Expected use case${Z}"
+        say "    ${B}This is the one to start with.${Z} It runs the identical code"
+        say "    path a Pi Zero 2 W boots -- same aarch64 payload, same GRUB, same"
+        say "    copal-init.sh -- so it is both a way to try the whole thing"
+        say "    without hardware, and the regression test for every change to"
+        say "    the installer. A boot that would cost a card write and a walk to"
+        say "    the Pi costs about a minute here, with a serial log to read."
+        say ""
+        say "  ${Y}Time${Z}  ~5 min to build, then boots in seconds"
+        ;;
+    vmx86)
+        say ""
+        say "  ${R}This target is not built yet.${Z}"
+        say ""
+        say "  Two things stand between here and there, both small:"
+        say ""
+        say "    1. ${B}MODEL=vm implies aarch64.${Z} A VM target that is x86_64"
+        say "       needs VM=1 and ARCH=x86_64 to coexist, which they currently"
+        say "       cannot ${D}(copal-prep.sh:438)${Z}."
+        say ""
+        say "    2. ${B}The VM boot config hardcodes console=ttyAMA0${Z}"
+        say "       ${D}(copal-prep.sh:1478)${Z}. That is QEMU's PL011, an ARM"
+        say "       device. On x86 the serial port is the 8250 at ttyS0, so this"
+        say "       would boot to a console nobody can see."
+        say ""
+        say "  Everything else already works: the download, the partitioning and"
+        say "  the payload copy are shared with the PC target, which is x86_64"
+        say "  and builds today."
+        say ""
+        say "  ${C}Expected use case${Z}"
+        say "    Verifying the PC code path without owning a spare PC. On Apple"
+        say "    Silicon this is QEMU TCG ${B}emulation${Z}, not virtualisation --"
+        say "    it will be slow. Slow is still much faster than finding a PC."
+        ;;
+    esac
+    say ""
+    rule
+}
+
+# ------------------------------------------------------- requirements check ---
+# What this particular Mac can do, checked rather than assumed.
+check_host() {
+    say ""
+    say "${B}WHAT THIS MAC CAN BUILD${Z}"
+    rule
+    say ""
+    hostarch="$(uname -m)"
+    printf '  %-24s %s\n' "macOS" "$(sw_vers -productVersion 2>/dev/null || echo unknown)"
+    printf '  %-24s %s\n' "Architecture" "$hostarch"
+    printf '  %-24s %s\n' "Model" "$(sysctl -n hw.model 2>/dev/null || echo unknown)"
+    printf '  %-24s %s cores\n' "CPU" "$(sysctl -n hw.ncpu 2>/dev/null || echo '?')"
+    printf '  %-24s %s GB\n' "RAM" "$(( $(sysctl -n hw.memsize 2>/dev/null || echo 0) / 1073741824 ))"
+    printf '  %-24s %s\n' "Free disk" "$(df -h /System/Volumes/Data 2>/dev/null | awk 'NR==2{print $4}')"
+    say ""
+    for t in curl shasum bsdtar diskutil hdiutil; do
+        if command -v "$t" >/dev/null 2>&1; then
+            printf '  %b[ok]%b   %-18s %s\n' "$G" "$Z" "$t" "required, present"
+        else
+            printf '  %b[--]%b   %-18s %s\n' "$R" "$Z" "$t" "REQUIRED, MISSING"
+        fi
+    done
+    if [ -d /Applications/UTM.app ]; then
+        printf '  %b[ok]%b   %-18s %s\n' "$G" "$Z" "UTM" \
+            "$(defaults read /Applications/UTM.app/Contents/Info.plist CFBundleShortVersionString 2>/dev/null || echo present)"
+    else
+        printf '  %b[  ]%b   %-18s %s\n' "$Y" "$Z" "UTM" "absent -- needed only for the VM targets"
+    fi
+    if command -v qemu-system-aarch64 >/dev/null 2>&1; then
+        printf '  %b[ok]%b   %-18s %s\n' "$G" "$Z" "qemu" "present -- copal-vm.sh can boot images directly"
+    else
+        printf '  %b[  ]%b   %-18s %s\n' "$Y" "$Z" "qemu" "absent -- optional (brew install qemu)"
+    fi
+    say ""
+    if [ "$hostarch" = arm64 ]; then
+        say "  ${G}Apple Silicon.${Z} The aarch64 VM target runs natively through"
+        say "  HVF. The x86_64 VM target will be emulated, and slow."
+    else
+        say "  ${Y}Intel Mac.${Z} The x86_64 VM target would run natively here;"
+        say "  the aarch64 one would be emulated. Card targets are unaffected."
+    fi
+    say ""
+    say "  ${D}All card and PC targets can be built from any Mac -- the payload is${Z}"
+    say "  ${D}copied, never executed, so the host architecture does not matter.${Z}"
+    say ""
+    rule
+}
+
+worth_knowing() {
+    say ""
+    say "${B}WORTH KNOWING BEFORE YOU START${Z}"
+    rule
+    say ""
+    say "  ${C}Nothing is erased without asking.${Z} Every destructive step stops"
+    say "  and names the disk it is about to write to. Answer 'image' at the"
+    say "  disk prompt to write to a file instead, and no hardware is touched."
+    say ""
+    say "  ${C}The root filesystem starts as RAM.${Z} Alpine boots diskless: / is"
+    say "  a tmpfs that evaporates at power-off. That is normal, and it is what"
+    say "  stage 3 exists to fix. Until stage 3 has run, treat anything you"
+    say "  install as temporary."
+    say ""
+    say "  ${C}UEFI only on anything that is not a Pi.${Z} A legacy-BIOS boot"
+    say "  needs Linux tools that do not exist on macOS."
+    say ""
+    say "  ${C}The stages are optional and re-runnable.${Z} Fifteen of them. Run"
+    say "  one, run four, run all of them unattended. Nothing is a point of no"
+    say "  return except stage 3, which reboots, and it tells you so."
+    say ""
+    say "  ${C}Copal is not a fork of Alpine.${Z} It downloads stock Alpine from"
+    say "  Alpine's own mirrors and calls Alpine's own tools."
+    say ""
+    say "  ${D}The full account is in docs/copal-handbook.md -- 1,963 lines${Z}"
+    say "  ${D}covering Alpine, the card layout, all fifteen stages and the${Z}"
+    say "  ${D}desktop. README.md covers the multi-target model.${Z}"
+    say ""
+    rule
+}
+
+# --------------------------------------------------------------- handover ---
+handover() {
+    k="$1"; label="$2"
+    say ""
+    say "  ${B}Ready to begin.${Z}"
+    say ""
+    say "  This hands over to:   ${C}MODEL=${k} ./copal-prep.sh${Z}"
+    case "$k" in
+        vm) say "  Suggested, for a VM:  ${C}MODEL=vm ./copal-prep.sh --image copal-vm.img${Z}" ;;
+    esac
+    say ""
+    say "  ${D}That script asks its own questions, and stops before every${Z}"
+    say "  ${D}destructive step. You can still back out.${Z}"
+    say ""
+    printf '%b' "  ${G}Begin?${Z} [y/N] "
+    read -r yn </dev/tty || exit 130
+    case "$yn" in
+        y|Y|yes|YES)
+            [ -x "$PREP" ] || { say "${R}error:${Z} $PREP is not executable"; exit 1; }
+            say ""
+            say "${C}==>${Z} Starting copal-prep.sh for ${B}${label}${Z}..."
+            say ""
+            if [ "$k" = vm ]; then
+                MODEL="$k" exec "$PREP" --image copal-vm.img
+            else
+                MODEL="$k" exec "$PREP"
+            fi
+            ;;
+        *)  say "  ${D}Not started. Back to the menu.${Z}" ;;
+    esac
+}
+
+# ------------------------------------------------------------------- main ---
+case "${1:-}" in
+    --flow)    flow; exit 0 ;;
+    --check)   check_host; exit 0 ;;
+    --targets) targets | while IFS='|' read -r k l a u; do
+                   printf '%-6s %-30s %s\n' "$k" "$(echo "$l" | sed 's/ *$//')" "$a"
+               done; exit 0 ;;
+    -h|--help) sed -n '5,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    '')        : ;;
+    *)         say "${R}error:${Z} unknown option '$1'. See --help."; exit 1 ;;
+esac
+
+[ -t 0 ] || { say "${R}error:${Z} this is an interactive menu. Try --flow, --check or --targets."; exit 1; }
+
+banner
+flow
+pause
+
+while :; do
+    menu
+    printf '%b' "${B}Choose${Z} [1-9, f, r, w, q]: "
+    read -r reply </dev/tty || exit 130
+    case "$reply" in
+        [1-9])
+            k=$(target_key "$reply")
+            l=$(target_label "$reply")
+            a=$(target_arch "$reply")
+            detail "$k" "$l" "$a"
+            if target_ready "$k"; then
+                handover "$k" "$l"
+            else
+                pause
+            fi
+            ;;
+        f|F) flow; pause ;;
+        r|R) check_host; pause ;;
+        w|W) worth_knowing; pause ;;
+        q|Q) say "\n${D}Nothing was written.${Z}\n"; exit 0 ;;
+        *)   say "${Y}Not one of 1-9, f, r, w or q.${Z}" ;;
+    esac
+done

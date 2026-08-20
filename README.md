@@ -88,15 +88,44 @@ supports UEFI and says so plainly rather than writing a card that will not boot.
 
 ## Networking
 
-Every target gets NAT. On a Pi that is whatever the wireless network hands out;
-under UTM it is UTM's **Shared Network** mode, which is NAT with a built-in
-DHCP server and DNS forwarder on a private subnet. The guest reaches the
-internet and the Alpine mirrors; the host is reachable at the gateway address;
-nothing on the LAN can reach the guest unless a port is forwarded.
+Every target gets NAT. On a Pi that is whatever the network hands out. Under
+UTM there are two NATs to choose between, and the difference matters more than
+the names suggest — established by reading the QEMU command line UTM actually
+builds, not from its documentation:
 
-That last part matters for the install itself. A forwarded port means the
-fifteen stages can be driven over SSH from the host, with real output and real
-scrollback, instead of through a VM console window.
+| `--net` | UTM `Mode` | QEMU backend | Guest address | Reachable from host | ICMP |
+|---|---|---|---|---|---|
+| `shared` *(default)* | `Shared` | `vmnet-shared` | `192.168.64.x` by DHCP | **directly, at its own IP** | yes |
+| `emulated` | `Emulated` | `user` (slirp) | private to the guest | only via a forwarded port | dropped |
+
+`vmnet-shared` is Apple's own framework. The guest gets a real DHCP lease that
+macOS records in `/var/db/dhcpd_leases`, and the host reaches it directly — so
+there is nothing to forward. `ping` works, which makes it a usable connectivity
+test. It is also considerably faster than slirp.
+
+**Host port forwarding only works in `Emulated` mode.** UTM accepts a
+`PortForward` entry in `Shared` mode and silently ignores it — no `hostfwd`
+appears on the command line — so a config that sets one there is lying about
+what it does. `utm-vm.sh` therefore emits `PortForward` only for
+`--net emulated`, and provides `utm-vm.sh ip`, which resolves the guest's real
+address by matching its MAC against the lease file:
+
+```sh
+utm/utm-vm.sh ip --target aarch64     # -> 192.168.64.7
+ssh root@192.168.64.7
+```
+
+Either way the point is the same: once the guest is on the network, the fifteen
+stages can be driven over SSH with real output and real scrollback instead of
+through a VM console window.
+
+**The guest has no address until stage 1.** Alpine's diskless boot leaves
+`eth0` down; `setup-alpine` is what configures it. That is expected, not a
+fault. To test connectivity before stage 1, from the guest console:
+
+```sh
+ip link set eth0 up && udhcpc -i eth0 && ping -c3 dl-cdn.alpinelinux.org
+```
 
 ## Status
 
@@ -108,7 +137,7 @@ rather than where it is going.
 | Pi targets (`armhf`, `armv7`, `aarch64`) | **Working** — inherited unchanged from Copal |
 | PC targets (`x86_64`, `x86`) | **Working** — inherited unchanged from Copal |
 | `MODEL=vm` aarch64 image for QEMU/UTM | **Working** — inherited; boots under `copal-vm.sh` |
-| `utm-aarch64` as a registered UTM VM | Not yet built |
+| `utm-aarch64` as a registered UTM VM | **Working** — `utm/utm-vm.sh` builds, registers and starts it; NAT, VirtFS share and UEFI boot all verified on UTM 4.7.4 |
 | `utm-x86_64` as a target at all | Not yet built — `MODEL=vm` implies aarch64, and the VM GRUB config hardcodes `console=ttyAMA0`, which is the ARM PL011 and does not exist on x86 |
 | Desktop (stage 4) under virtio-gpu | Not yet verified — stage 4 installs `xf86-video-fbdev`, chosen for the Pi's VideoCore |
 | Split of `copal-prep.sh` into `lib/` + a real `guest/copal-init.sh` | Not yet done |
@@ -125,14 +154,29 @@ Requires macOS, `curl`, `bsdtar` and `shasum` (all stock), plus
 [UTM](https://mac.getutm.app) for the VM targets.
 
 ```sh
-# A card for a Pi
-MODEL=zero2 ./copal-prep.sh
+./copal
+```
 
-# A PC / Intel Mac, 64-bit UEFI
-MODEL=pc ./copal-prep.sh
+That is the front door, and it is the recommended way in. It shows the whole
+process on one screen before anything happens — what runs on this Mac, what
+runs on the machine being built, and where the line between them falls — then a
+target menu where each entry states its equipment, CPU, minimum requirements and
+expected use case. It writes nothing and touches no disk; every path out of it
+ends in an explicit *Begin* that names the script it hands over to.
 
-# A disk image instead of a card -- nothing physical is touched
-MODEL=vm ./copal-prep.sh --image copal-vm.img
+```sh
+./copal --flow      # the flow chart alone
+./copal --check     # what THIS Mac can build: tools, RAM, disk, UTM, qemu
+./copal --targets   # the target list, one per line
+```
+
+The underlying script is still there, and still takes the same variables — the
+menu is a front door, not a wrapper that hides things:
+
+```sh
+MODEL=zero2 ./copal-prep.sh                      # a card for a Pi
+MODEL=pc    ./copal-prep.sh                      # a PC / Intel Mac, 64-bit UEFI
+MODEL=vm    ./copal-prep.sh --image copal-vm.img # an image; nothing physical is touched
 ./copal-vm.sh --graphical
 ```
 
@@ -151,8 +195,10 @@ bindings, the account model, the SD-card wear analysis — is in
 
 | Path | What it is |
 |---|---|
+| `copal` | **Start here.** The front door: flow chart, target menu, per-target briefing. Writes nothing |
 | `copal-prep.sh` | Runs on the **Mac**. Downloads and verifies Alpine, prepares the medium, generates everything the target needs |
-| `copal-vm.sh` | Boots a prepared image under QEMU. `--check` boots it headless and reports a verdict |
+| `copal-vm.sh` | Boots a prepared image under QEMU. `--check` boots headless and reports a verdict — **the automated verification path** |
+| `utm/utm-vm.sh` | Wraps a prepared image in a UTM VM: NAT, shared folder, UEFI boot — **the interactive path** |
 | `Makefile` | `make image`, `make vm`, `make check`, `make lint` |
 | `fetch-minivmac.sh` | Assembles the Mini vMac working set on demand — nothing binary is tracked here |
 | `tools/minivmac/` | Mini vMac launcher scripts |
