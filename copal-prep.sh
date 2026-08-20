@@ -158,6 +158,7 @@ size_to_bytes() {
 # The old parser accepted --refresh only as $1 and treated everything else as
 # the payload directory. This loop keeps both of those meanings.
 REFRESH=0
+CACHE_ONLY=0
 IMAGE_MODE=0
 IMAGE_PATH=""
 # 64g, not 16g, and the reason is arithmetic rather than generosity. The image
@@ -182,6 +183,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --refresh) REFRESH=1; shift ;;
         --fresh)   FRESH=1; shift ;;
+        --cache-only) CACHE_ONLY=1; shift ;;
         --image=*) IMAGE_MODE=1; IMAGE_PATH="${1#--image=}"; shift ;;
         --image)
             IMAGE_MODE=1; shift
@@ -198,6 +200,7 @@ copal-prep.sh -- write a Copal Linux card or disk image from macOS.
 
   ./copal-prep.sh                      pick a board, write a card
   ./copal-prep.sh --image copal.img    write a bootable disk image instead
+  ./copal-prep.sh --cache-only         download and verify the payload, then stop
   ./copal-prep.sh --fresh --image X    delete the image first, rebuild from nothing
   ./copal-prep.sh --refresh            rewrite generated files on an existing card
   ./copal-prep.sh /path/to/payload     use an extracted payload, skip the download
@@ -853,6 +856,30 @@ fetch_bootloader() {  # <payload dir>
        repository on the card would be unreadable to apk."
     info "Repository: apks/$ARCH ($(ls "$_dest/apks/$ARCH"/*.apk 2>/dev/null | wc -l | xargs) packages, $(du -sh "$_dest/apks" | awk '{print $1}'))"
 }
+
+# --------------------------------------------------------------- cache only ---
+#
+# Fetch the payload for this board and stop. No questions, no disk, no card.
+#
+# It exits HERE, above the "who uses it" block, and the position is the whole
+# point: everything below this line either asks a question or touches a disk,
+# and a cache warm-up must do neither. That is what makes it safe to run for
+# nine boards in a row unattended, which is what `copal cache all` does.
+#
+# It reuses fetch_payload rather than fetching anything itself, so the cache is
+# filled by exactly the code that a real build verifies against -- same URL,
+# same published SHA256, same extraction. A prefetch that downloaded by some
+# other route could put a file in the cache that the build then rejects, which
+# would be worse than no prefetch at all.
+#
+# The payload is keyed by platform and architecture, never by board: zero2, pi4
+# and pi5 are one download between them. Nine boards need nine artefacts.
+if [ "$CACHE_ONLY" -eq 1 ]; then
+    info "Cache only -- ${MODEL} (${PLATFORM}/${ARCH}). No disk is touched."
+    _cached=$(fetch_payload | tail -n1)
+    info "Ready: $_cached"
+    exit 0
+fi
 
 # ------------------------------------------------------------- who uses it ---
 # Asked here, immediately before the download, because this is the last quiet
