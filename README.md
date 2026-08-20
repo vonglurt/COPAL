@@ -89,6 +89,136 @@ menus as they actually appear.
 
 ---
 
+## Quick start — x86_64 in UTM, on full automatic
+
+The shortest route from nothing to a running desktop: no card, no Pi, and no
+sitting and watching. One command on the Mac, three answers in the guest, and
+then a few hours you do not have to be present for.
+
+### 1 · On the Mac
+
+```sh
+make utm-x86            # or: bin/utm-x86.sh
+```
+
+That builds `build/copal-vmx86.img` if it is not already there, registers it
+with UTM, and starts it. Running it again is safe — it creates a machine only
+when there is not one, and never replaces one.
+
+Two things go wrong at this point, both with one-line fixes:
+
+- **`Error: Virtual machine not found`** — UTM was already open when the bundle
+  was written, and it does not rescan its folder while running. Hand it the
+  bundle once, then run `make utm-x86` again:
+
+  ```sh
+  open -a UTM ~/Library/Containers/com.utmapp.UTM/Data/Documents/Copal-x86_64.utm
+  ```
+
+- **The window takes no keystrokes** — switch to the serial console: the VM
+  window's toolbar → **Displays → Serial 1**. On x86_64 that console is
+  `ttyS0`, not `ttyAMA0`. It is a plain UART with a driver built into the
+  kernel, so it works before anything has come out of modloop.
+
+### 2 · Log in as root — there is no password yet
+
+At the login prompt type `root` and press **Enter** at the password prompt.
+Leaving it blank is correct: nothing has set one yet, and setting one is part
+of what you are about to run.
+
+```sh
+ls /media/                      # expect vda1
+sh /media/vda1/copal-init.sh
+```
+
+On an image nobody has set up, the first question is whether Copal should do
+the whole thing by itself. Answer **yes**. (Answer no and you get the ordinary
+stage menu, where you pick each stage yourself — that is [Step
+5](#step-5--the-stage-menu-on-the-target).)
+
+### 3 · The three answers it needs, all near the start
+
+Full automatic answers every question except these:
+
+1. **Who you are** — a name and email for git commits. The Mac that wrote the
+   image offers its own git identity as the default, so this is usually just
+   Enter.
+2. **A root password.** `setup-alpine` asks for it, and there is no answer-file
+   variable for a password — this is the one thing a full-automatic install
+   cannot fill in for you.
+3. **The same password, twice more.** Once to confirm it, then again for your
+   own account. **Type the same thing all three times.**
+
+Then walk away. It takes hours. It reboots itself once, part-way through stage
+3, and resumes on its own without being asked.
+
+### 4 · When it has finished
+
+Log in as the username chosen when the image was written — `user` unless you
+said otherwise — and start the desktop:
+
+```sh
+startx
+```
+
+Root installs the system; your own account runs it. Typing `startx` while still
+root is stopped on purpose, with an explanation rather than a lock.
+
+### Stopping, resuming, and what it costs
+
+The thing that makes an automatic install survive a reboot is a marker file on
+the boot partition. Delete it and it stops resuming:
+
+```sh
+rm /media/vda1/copal-auto
+```
+
+To start one explicitly rather than answering the question: before stage 3 that
+is `sh /media/vda1/copal-init.sh --auto`; after stage 3 the script has been
+installed onto the root filesystem and it is just `copal --auto`.
+
+**This route is emulated.** x86_64 on Apple Silicon runs under TCG, with no
+hardware virtualisation, so expect it to be slow — take it when you want the
+x86 image specifically. For a fast VM on this Mac, `make utm` registers the
+aarch64 machine instead, and `make vm` boots that same image under QEMU with
+the serial console on your terminal.
+
+### Running both machines at once
+
+The aarch64 and x86_64 machines are safe to install and run concurrently. They
+share nothing that matters:
+
+| | aarch64 | x86_64 |
+|---|---|---|
+| UTM machine | `Copal-aarch64` | `Copal-x86_64` |
+| Image | `build/copal-vm.img` | `build/copal-vmx86.img` |
+| Disk in the bundle | its own qcow2 | its own qcow2 |
+| SSH forward | `localhost:2222` | `localhost:2223` |
+| MAC address | random at create | random at create |
+| Hostname | random per build | random per build |
+| Acceleration | HVF, native | TCG, emulated |
+
+Every generated filename carries the model — `copal-$(MODEL).img`,
+`copal-$(MODEL)-check.log`, `copal-prep-auto-$(MODEL).log` — so two models
+never write to one name and a log always says which machine produced it.
+
+**One thing is genuinely shared, on purpose:** the folder both guests mount,
+`~/Downloads/SharedVM`. That is what it is for. Two installs writing the *same
+filename* there would race, so give one of them its own if that matters:
+
+```sh
+SHARE_DIR=~/Downloads/SharedVM-x86 utm/utm-vm.sh create --target x86_64 --image build/copal-vmx86.img
+```
+
+**Build one image at a time.** Running the two guests together is fine; running
+two `copal-prep.sh` builds together is not, because every card and image labels
+its boot partition `COPALBOOT` and both want `/Volumes/COPALBOOT`. macOS gives
+the second one `/Volumes/COPALBOOT 1` without saying so. The script checks which
+device is really behind that path and stops rather than write to the other
+build's disk — but the fix is to let the first build finish.
+
+---
+
 ## The idea
 
 The original Copal wrote SD cards from a Mac. That worked, but every change to
