@@ -70,12 +70,43 @@
 set -euo pipefail
 
 BOOT_LABEL="COPALBOOT"
+# WHY THE LABEL BEING A CONSTANT IS A HAZARD, and what is done about it.
+#
+# Every image and every card this script writes labels its boot partition
+# COPALBOOT, so every one of them wants to be mounted at /Volumes/COPALBOOT.
+# One at a time that is fine. Two at once is not: macOS resolves the clash by
+# mounting the second as "/Volumes/COPALBOOT 1" and saying nothing, while this
+# script -- which knows only the unsuffixed name -- carries on writing to the
+# FIRST one. The payload of an x86_64 build lands on an aarch64 card, or the
+# other way round, and nothing reports an error.
+#
+# So the mount point is never trusted on its name. assert_mount_is asks which
+# device is actually mounted there and stops if it is not ours. Concurrency is
+# the obvious way in, but a leftover mount from an interrupted run does it too.
 # The boot partition holds firmware, kernel, initramfs, modloop and device
 # trees -- about 110 MB in practice. 4G is enormously more than that needs;
 # it is sized for headroom to keep several kernels and a rescue image around,
 # not because the payload requires it. BOOT_SIZE=2G is just as workable.
 BOOT_SIZE="${BOOT_SIZE:-4G}"
 ROOT_LABEL="COPALROOT"
+
+# Refuse to write through a mount point that belongs to somebody else's run.
+# df's second line names the device behind a path, which is the only question
+# worth asking here -- the directory existing proves nothing about whose it is.
+assert_mount_is() {  # <mount point> <bare disk name, e.g. disk4>
+    _am_want="/dev/${2}s1"
+    _am_got=$(df "$1" 2>/dev/null | awk 'NR==2 {print $1}')
+    [ "$_am_got" = "$_am_want" ] && return 0
+    die "$1 is mounted from ${_am_got:-nothing}, not $_am_want.
+
+       Another copal-prep.sh is very likely running: both label their boot
+       partition $BOOT_LABEL, both want this exact path, and macOS gives the
+       second one '$1 1' without complaining. Writing on would put this
+       build's payload on the other build's disk.
+
+       Finish or stop that run first, then try again. If nothing else is
+       running, an earlier run left a mount behind:  diskutil unmount '$1'"
+}
 # "R" means the remainder of the card. Earlier versions used a fixed 16G and
 # left the rest unallocated, which stranded most of a large card for no
 # benefit -- the space cannot be reached later without repartitioning.
@@ -1241,6 +1272,7 @@ if [ "$REFRESH" -eq 1 ]; then
     MNT="/Volumes/$BOOT_LABEL"
     diskutil mount "${DISK}s1" >/dev/null 2>&1 || true
     [ -d "$MNT" ] || die "could not mount ${DISK}s1 at $MNT -- is this a card written by copal-prep.sh?"
+    assert_mount_is "$MNT" "$DISK"
     [ -e "$MNT/config.txt" ] && [ -e "$MNT/boot/vmlinuz-rpi" ] \
         || die "$MNT does not contain an Alpine payload. Refusing to refresh a card that was never written."
     export COPYFILE_DISABLE=1
@@ -1378,6 +1410,7 @@ sleep 2
 MNT="/Volumes/$BOOT_LABEL"
 diskutil mount "${DISK}s1" >/dev/null 2>&1 || true
 [ -d "$MNT" ] || die "expected $MNT to be mounted after formatting; check 'diskutil list'"
+assert_mount_is "$MNT" "$DISK"
 
 # ------------------------------------------------------------------ copy ---
 step "Copy the Alpine payload onto ${BOOT_LABEL}" \
