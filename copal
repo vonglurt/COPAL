@@ -390,18 +390,44 @@ worth_knowing() {
 }
 
 # --------------------------------------------------------------- handover ---
+# A VM target is not a medium. It has no card to identify and nothing to erase,
+# so the handover names an image file and copal-prep.sh never reaches its disk
+# prompt at all.
+#
+# This is a list rather than a test on the key because getting it wrong is not
+# a cosmetic fault. vmx86 was missing from it, and the effect was that someone
+# who had just been shown "Equipment you need -- this Mac, and UTM. That is the
+# entire list." was handed straight to "Identify the SD card", a prompt whose
+# next two questions are which disk to destroy and the word ERASE. Anything
+# added to the target table that is a VM belongs here on the same commit.
+image_for() {
+    case "$1" in
+        vm)    echo "build/copal-vm.img" ;;
+        vmx86) echo "build/copal-vmx86.img" ;;
+        *)     echo "" ;;
+    esac
+}
+
 handover() {
     k="$1"; label="$2"
+    img="$(image_for "$k")"
     say ""
     say "  ${B}Ready to begin.${Z}"
     say ""
-    say "  This hands over to:   ${C}MODEL=${k} ./copal-prep.sh${Z}"
-    case "$k" in
-        vm) say "  Suggested, for a VM:  ${C}MODEL=vm ./copal-prep.sh --image build/copal-vm.img${Z}" ;;
-    esac
-    say ""
-    say "  ${D}That script asks its own questions, and stops before every${Z}"
-    say "  ${D}destructive step. You can still back out.${Z}"
+    if [ -n "$img" ]; then
+        say "  This hands over to:   ${C}MODEL=${k} ./copal-prep.sh --image ${img}${Z}"
+        say ""
+        say "  ${D}An image file, not a disk. Nothing physical is touched, there is${Z}"
+        say "  ${D}no disk to identify and no erase to confirm.${Z}"
+    else
+        say "  This hands over to:   ${C}MODEL=${k} ./copal-prep.sh${Z}"
+        say ""
+        say "  ${D}That script asks its own questions, and stops before every${Z}"
+        say "  ${D}destructive step. You can still back out.${Z}"
+        say ""
+        say "  ${D}It asks which disk to write to. Answer ${Z}${C}image${Z}${D} there instead and it${Z}"
+        say "  ${D}writes to a file, leaving every disk on this Mac alone.${Z}"
+    fi
     say ""
     printf '%b' "  ${G}Begin?${Z} [y/N] "
     read -r yn </dev/tty || exit 130
@@ -411,8 +437,8 @@ handover() {
             say ""
             say "${C}==>${Z} Starting copal-prep.sh for ${B}${label}${Z}..."
             say ""
-            if [ "$k" = vm ]; then
-                MODEL="$k" exec "$PREP" --image build/copal-vm.img
+            if [ -n "$img" ]; then
+                MODEL="$k" exec "$PREP" --image "$img"
             else
                 MODEL="$k" exec "$PREP"
             fi

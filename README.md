@@ -353,11 +353,10 @@ UTM ON APPLE SILICON   aarch64
 
   Ready to begin.
 
-  This hands over to:   MODEL=vm ./copal-prep.sh
-  Suggested, for a VM:  MODEL=vm ./copal-prep.sh --image build/copal-vm.img
+  This hands over to:   MODEL=vm ./copal-prep.sh --image build/copal-vm.img
 
-  That script asks its own questions, and stops before every
-  destructive step. You can still back out.
+  An image file, not a disk. Nothing physical is touched, there is
+  no disk to identify and no erase to confirm.
 ```
 
 Only then does it offer to begin, and the offer names the exact command it is
@@ -367,10 +366,27 @@ way to use this menu:
 ```
   Ready to begin.
 
-  This hands over to:   MODEL=vm ./copal-prep.sh
-  Suggested, for a VM:  MODEL=vm ./copal-prep.sh --image build/copal-vm.img
+  This hands over to:   MODEL=vm ./copal-prep.sh --image build/copal-vm.img
+
+  An image file, not a disk. Nothing physical is touched, there is
+  no disk to identify and no erase to confirm.
 
   Begin? [y/N]
+```
+
+The two VM targets hand over with `--image`, so they never reach the disk
+prompt at all. Every other target hands over without one, and the offer says
+so — along with the fact that answering `image` at that prompt gets you a file
+instead of a card:
+
+```
+  This hands over to:   MODEL=zero2 ./copal-prep.sh
+
+  That script asks its own questions, and stops before every
+  destructive step. You can still back out.
+
+  It asks which disk to write to. Answer image there instead and it
+  writes to a file, leaving every disk on this Mac alone.
 ```
 
 The other keys are worth knowing:
