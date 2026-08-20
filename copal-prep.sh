@@ -64,7 +64,8 @@
 # --image writes to a sparse file rather than a card. Nothing physical is
 # touched, so there is no identifier to mistype: it is the way to try a change
 # without a boot cycle, and with MODEL=vm the result boots on this Mac at
-# native speed. IMAGE_SIZE=16g by default.
+# native speed. IMAGE_SIZE=64g by default -- sparse, so it costs only what is
+# written. See IMAGE_SIZE below for why 64 and not 16.
 #
 set -euo pipefail
 
@@ -128,7 +129,22 @@ size_to_bytes() {
 REFRESH=0
 IMAGE_MODE=0
 IMAGE_PATH=""
-IMAGE_SIZE="${IMAGE_SIZE:-16g}"
+# 64g, not 16g, and the reason is arithmetic rather than generosity. The image
+# is sparse -- it costs only what is written, and a fresh one is about 550 MB on
+# disk whatever this says -- so the number is a ceiling, not an allocation.
+#
+# 16g was too low for the thing this script actually builds. BOOT_SIZE takes 4G
+# off the top, leaving ~12G of root, and a full automatic install does not fit
+# in that: texlive-full is ~4 GB and KiCad ~2 GB in stage 14, the toolchain in
+# stage 7 is another 2-3 GB, the catalogue in stage 12 is 3-5 GB, and Chromium
+# alone is 350 MB. A complete run lands around 15-25 GB. The big installs are
+# gated on df and skip themselves rather than filling the disk, so 16g did not
+# corrupt anything -- it just quietly produced a system missing the half of the
+# catalogue that would not fit, which is a worse failure for being silent.
+#
+# 64g leaves ~60 GiB of root and 2.5-4x headroom. Lower it freely for a test
+# image that will never run past stage 4.
+IMAGE_SIZE="${IMAGE_SIZE:-64g}"
 FRESH=0
 SRC_ARG=""
 while [ $# -gt 0 ]; do
@@ -192,7 +208,7 @@ fi
 # made a zero-byte image and a partitioning failure that blamed the disk.
 # IMAGE_SIZE has a default, so validating it always costs nothing.
 IMAGE_BYTES=$(size_to_bytes "$IMAGE_SIZE")
-[ -n "$IMAGE_BYTES" ] || die "IMAGE_SIZE='$IMAGE_SIZE' is not a size. Use e.g. IMAGE_SIZE=16g or 8192m."
+[ -n "$IMAGE_BYTES" ] || die "IMAGE_SIZE='$IMAGE_SIZE' is not a size. Use e.g. IMAGE_SIZE=64g or 8192m."
 # The image has to hold the boot partition and leave something for the root, or
 # diskutil fails partway through with a complaint about the second partition
 # rather than about the size, which is the confusing way round.

@@ -180,6 +180,26 @@ MODEL=vm    ./copal-prep.sh --image copal-vm.img # an image; nothing physical is
 ./copal-vm.sh --graphical
 ```
 
+### Sizing
+
+`IMAGE_SIZE` defaults to **64g**, which yields a 4 GB FAT boot partition and
+**~60 GiB of root**. The image is sparse — a fresh one is about 550 MB on disk
+and grows only as it is written, reaching 15–25 GB after a full fifteen-stage
+run. The number is a ceiling, not an allocation.
+
+It used to default to 16g, and that was too small for what this builds: minus
+the boot partition it leaves ~12 GiB, and `texlive-full` (~4 GB), KiCad (~2 GB),
+the toolchain (~2–3 GB) and the catalogue (~3–5 GB) do not fit. The big installs
+are gated on `df` and skip themselves rather than filling the disk, so a 16 GB
+image did not break — it quietly produced a system missing half the catalogue,
+which is a worse failure for being silent.
+
+Lower it freely for a test image that will never run past stage 4:
+
+```sh
+IMAGE_SIZE=12g MODEL=vm ./copal-prep.sh --fresh --image test.img
+```
+
 Then, on the target, as root:
 
 ```sh
