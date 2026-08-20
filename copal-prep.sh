@@ -174,7 +174,12 @@ copal-prep.sh -- write a Copal Linux card or disk image from macOS.
   MODEL=zero2 ./copal-prep.sh          choose the board without the menu
   MODEL=vm ./copal-prep.sh --image c.img   aarch64 UEFI image for UTM/QEMU
 
-Environment: MODEL ARCH ALPINE_VER MIRROR WORKDIR BOOT_SIZE ROOT_SIZE IMAGE_SIZE
+Environment: MODEL ARCH ALPINE_VER MIRROR BUILDDIR CACHEDIR BOOT_SIZE ROOT_SIZE
+             IMAGE_SIZE
+
+  BUILDDIR  everything generated -- images, EFI stores        (default ./build)
+  CACHEDIR  the download cache -- payloads and ISOs     (default ./build/cache)
+            WORKDIR is still honoured; it is the old name for CACHEDIR.
 USAGE
             exit 0 ;;
         -*) die "unknown option '$1'. Use --refresh, --fresh, --image [PATH] or --help." ;;
@@ -575,7 +580,25 @@ esac
 
 BRANCH="v${ALPINE_VER%.*}"
 MIRROR="${MIRROR:-https://dl-cdn.alpinelinux.org/alpine}"
-WORKDIR="${WORKDIR:-$(cd "$(dirname "$0")" && pwd)/work}"
+# Two variables, because there are two lifetimes here and one variable used to
+# serve both. Both live under build/ so that nothing generated is left in the
+# repository root, but they are not interchangeable:
+#
+#   BUILDDIR  OUTPUT. Disk images, EFI variable stores, transcripts. Worthless
+#             to anyone else, and sometimes the result of a two-hour install.
+#             Reproduced by building again. `make clean` empties it.
+#   CACHEDIR  CACHE. Checksum-verified Alpine payloads and GRUB ISOs, shared by
+#             every build, costing bandwidth rather than CPU to replace. Which
+#             is why `make clean` steps around it and only `make distclean`
+#             takes it.
+#
+# Conflating them was not merely untidy: attach_image defaulted a disk image
+# into the cache directory, so a rule that emptied the cache would have taken a
+# finished install with it.
+BUILDDIR="${BUILDDIR:-$(cd "$(dirname "$0")" && pwd)/build}"
+# WORKDIR is honoured because it is what this variable used to be called and
+# scripted callers may still set it.
+CACHEDIR="${CACHEDIR:-${WORKDIR:-$BUILDDIR/cache}}"
 
 # --- interactive stepping ---------------------------------------------------
 # Every stage pauses first and describes what it is about to do. Enter proceeds;
@@ -651,9 +674,9 @@ BOOTLOADER_ISO="alpine-virt-${ALPINE_VER}-${ARCH}.iso"
 BOOTLOADER_URL="${MIRROR}/${BRANCH}/releases/${ARCH}/${BOOTLOADER_ISO}"
 
 fetch_payload() {
-    mkdir -p "$WORKDIR"
-    local archive="$WORKDIR/$TARBALL"
-    local sumfile="$WORKDIR/${TARBALL}.sha256"
+    mkdir -p "$CACHEDIR"
+    local archive="$CACHEDIR/$TARBALL"
+    local sumfile="$CACHEDIR/${TARBALL}.sha256"
 
     info "Release : Alpine ${ALPINE_VER} (${ARCH})"
     info "Source  : $URL"
@@ -665,7 +688,7 @@ fetch_payload() {
 
     if [ -f "$archive" ]; then
         info "Found an existing $TARBALL; verifying..."
-        if (cd "$WORKDIR" && shasum -a 256 -c "${TARBALL}.sha256" >/dev/null 2>&1); then
+        if (cd "$CACHEDIR" && shasum -a 256 -c "${TARBALL}.sha256" >/dev/null 2>&1); then
             info "Checksum matches; skipping download."
         else
             warn "existing archive failed verification; re-downloading"
@@ -684,11 +707,11 @@ fetch_payload() {
     fi
 
     info "Verifying SHA256..."
-    (cd "$WORKDIR" && shasum -a 256 -c "${TARBALL}.sha256") \
+    (cd "$CACHEDIR" && shasum -a 256 -c "${TARBALL}.sha256") \
         || die "CHECKSUM MISMATCH -- the download is corrupt or tampered with. Refusing to write it to the card."
 
     info "Extracting..."
-    local dest="$WORKDIR/${TARBALL%.tar.gz}"
+    local dest="$CACHEDIR/${TARBALL%.tar.gz}"
     rm -rf "$dest"
     mkdir -p "$dest"
     # bsdtar/gnutar on macOS: COPYFILE_DISABLE keeps AppleDouble out of the tree.
@@ -733,13 +756,13 @@ fetch_payload() {
 # being downloaded for the bootloader. One download, both problems.
 fetch_bootloader() {  # <payload dir>
     _dest="$1"
-    _iso="$WORKDIR/$BOOTLOADER_ISO"
-    _sum="$WORKDIR/${BOOTLOADER_ISO}.sha256"
+    _iso="$CACHEDIR/$BOOTLOADER_ISO"
+    _sum="$CACHEDIR/${BOOTLOADER_ISO}.sha256"
 
     info "Bootloader: GRUB, from $BOOTLOADER_ISO"
     curl -fsSL -o "$_sum" "${BOOTLOADER_URL}.sha256" \
         || die "could not download the bootloader checksum from ${BOOTLOADER_URL}.sha256"
-    if [ -f "$_iso" ] && ! (cd "$WORKDIR" && shasum -a 256 -c "${BOOTLOADER_ISO}.sha256" >/dev/null 2>&1); then
+    if [ -f "$_iso" ] && ! (cd "$CACHEDIR" && shasum -a 256 -c "${BOOTLOADER_ISO}.sha256" >/dev/null 2>&1); then
         warn "existing $BOOTLOADER_ISO failed verification; re-downloading"
         rm -f "$_iso"
     fi
@@ -747,7 +770,7 @@ fetch_bootloader() {  # <payload dir>
         info "Downloading $BOOTLOADER_ISO (~66 MB; one 850 kB file is used from it)..."
         curl -fL -C - -o "$_iso" "$BOOTLOADER_URL" || die "download failed: $BOOTLOADER_URL"
     fi
-    (cd "$WORKDIR" && shasum -a 256 -c "${BOOTLOADER_ISO}.sha256") \
+    (cd "$CACHEDIR" && shasum -a 256 -c "${BOOTLOADER_ISO}.sha256") \
         || die "CHECKSUM MISMATCH on $BOOTLOADER_ISO -- refusing to take a bootloader from it."
 
     # bsdtar reads ISO9660 directly, so the image never has to be mounted --
@@ -889,10 +912,10 @@ if [ "$REFRESH" -eq 1 ]; then
 elif [ -z "$SRC" ]; then
     step "Download and verify Alpine ${ALPINE_VER} (${ARCH})" \
         "Downloads : $URL" \
-        "Into      : $WORKDIR" \
+        "Into      : $CACHEDIR" \
         "Verifies the published SHA256 before anything is written to a card." \
         "" \
-        "Reads and writes only inside $WORKDIR." \
+        "Reads and writes only inside $CACHEDIR." \
         "No disk is touched by this step. Safe to abort."
     SRC=$(fetch_payload | tail -n1)
 else
@@ -961,7 +984,7 @@ if [ -n "$kernel_config" ]; then
         esac
         die "payload mismatch: this kernel is $payload_arch, but ARCH=$ARCH${MODEL:+ (MODEL=$MODEL)}.
        $_symptom
-       Delete $WORKDIR and re-run, or pass the matching payload directory."
+       Delete $CACHEDIR and re-run, or pass the matching payload directory."
     fi
     info "Kernel  : $payload_arch (matches ARCH=$ARCH)"
 fi
@@ -987,7 +1010,7 @@ IMAGE_DEV=""
 attach_image() {
     local seek_mb default_path
 
-    default_path="$WORKDIR/copal-${MODEL:-$ARCH}.img"
+    default_path="$BUILDDIR/copal-${MODEL:-$ARCH}.img"
     if [ -z "$IMAGE_PATH" ]; then
         printf '\nPath for the disk image [%s]: ' "$default_path" >&2
         read -r IMAGE_PATH < /dev/tty || true

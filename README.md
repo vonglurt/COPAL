@@ -354,7 +354,7 @@ UTM ON APPLE SILICON   aarch64
   Ready to begin.
 
   This hands over to:   MODEL=vm ./copal-prep.sh
-  Suggested, for a VM:  MODEL=vm ./copal-prep.sh --image copal-vm.img
+  Suggested, for a VM:  MODEL=vm ./copal-prep.sh --image build/copal-vm.img
 
   That script asks its own questions, and stops before every
   destructive step. You can still back out.
@@ -368,7 +368,7 @@ way to use this menu:
   Ready to begin.
 
   This hands over to:   MODEL=vm ./copal-prep.sh
-  Suggested, for a VM:  MODEL=vm ./copal-prep.sh --image copal-vm.img
+  Suggested, for a VM:  MODEL=vm ./copal-prep.sh --image build/copal-vm.img
 
   Begin? [y/N]
 ```
@@ -396,7 +396,7 @@ what the answer binds to, because most of them are hard to change afterwards:
 | 1 | *What is this card for?* | the architecture and the bootloader | `MODEL=vm`, `MODEL=zero2`, … |
 | 2 | *Username* `[user]` | `USEROPTS`, `copal.conf`, the `doas` rule, `/home/<name>`, the account the SSH key is authorised for | `CFG_USER=alice` |
 | 3 | *Git identity … offer that as the default?* `[Y/n]` | what stage 1 proposes on the target. Declining leaves it empty and the target asks | answer `n`, or have no git config |
-| 4 | *Disk identifier … or `image` for a file* | the medium | `--image copal-vm.img` |
+| 4 | *Disk identifier … or `image` for a file* | the medium | `--image build/copal-vm.img` |
 | 5 | *Type the disk identifier to confirm* | proves you read **which** disk | — image mode never asks |
 | 6 | *Type ERASE to proceed* | proves intent | — image mode never asks |
 
@@ -428,8 +428,8 @@ Skipping the front door entirely, which is what the Makefile and any scripted
 caller does:
 
 ```sh
-MODEL=vm    ./copal-prep.sh --image copal-vm.img   # aarch64 VM image
-MODEL=vmx86 ./copal-prep.sh --image copal-x86.img  # x86_64 VM image
+MODEL=vm    ./copal-prep.sh --image build/copal-vm.img   # aarch64 VM image
+MODEL=vmx86 ./copal-prep.sh --image build/copal-x86.img  # x86_64 VM image
 MODEL=zero2 ./copal-prep.sh                        # a card for a Pi Zero 2 W
 MODEL=pc    ./copal-prep.sh                        # a USB stick for a UEFI laptop
 CFG_USER=alice MODEL=pi4 ./copal-prep.sh           # no questions except the erase
@@ -442,6 +442,7 @@ CFG_USER=alice MODEL=pi4 ./copal-prep.sh           # no questions except the era
 | `--refresh` | rewrite only the generated files on an existing card — no partitioning, no erase, no re-download |
 | `/path/to/payload` | use an already-extracted Alpine payload and skip the download |
 | `IMAGE_SIZE=12g` | smaller image. The default 64g is a sparse ceiling, not an allocation — see [Sizing](#sizing) |
+| `BUILDDIR=` / `CACHEDIR=` | where output and the download cache go. Default `./build` and `./build/cache` |
 | `MODEL=` / `ARCH=` | choose the board, or the architecture directly |
 
 ### Step 4 — boot it
@@ -450,7 +451,7 @@ CFG_USER=alice MODEL=pi4 ./copal-prep.sh           # no questions except the era
 it from, which is the one that works from the very first frame:
 
 ```sh
-./copal-vm.sh                    # boot copal-vm.img, serial console here
+./copal-vm.sh                    # boot build/copal-vm.img, serial console here
 ./copal-vm.sh --graphical        # a window instead, to watch i3 come up
 ./copal-vm.sh --snapshot         # discard every write on exit
 ./copal-vm.sh --check            # headless: boot, grep, verdict, non-zero on failure
@@ -473,7 +474,7 @@ make vm           # boot it, serial here
 make graphical    # boot it in a window
 make check        # boot headless and report a verdict
 make sd-zero2     # write a physical card for a Pi Zero 2 W
-make img-pc       # write copal-pc.img instead of a card
+make img-pc       # write build/copal-pc.img instead of a card
 
 make lint         # sh -n both scripts, including the generated copal-init.sh
 make space        # what is taking up room, and which target removes it
@@ -495,13 +496,13 @@ result is meant to mean something.
 into, and a folder shared with the Mac.
 
 ```sh
-utm/utm-vm.sh create  --target aarch64 --image copal-vm.img
+utm/utm-vm.sh create  --target aarch64 --image build/copal-vm.img
 utm/utm-vm.sh start   --target aarch64
 utm/utm-vm.sh ip      --target aarch64      # -> 192.168.64.7
 utm/utm-vm.sh status  --target aarch64
 utm/utm-vm.sh log     --target aarch64
 utm/utm-vm.sh stop    --target aarch64
-utm/utm-vm.sh refresh --target aarch64 --image copal-vm.img
+utm/utm-vm.sh refresh --target aarch64 --image build/copal-vm.img
 ```
 
 Leave `--net` alone unless you need a forwarded port: the default `shared` gives
@@ -798,7 +799,7 @@ The order to try things in, cheapest first:
    partition; the first boot's copy is `firstrun.log`, which macOS can read once
    the image is attached again:
    ```sh
-   hdiutil attach -imagekey diskimage-class=CRawDiskImage copal-vm.img
+   hdiutil attach -imagekey diskimage-class=CRawDiskImage build/copal-vm.img
    ```
 7. **No network before stage 1 is expected**, not a fault — Alpine's diskless
    boot leaves `eth0` down and `setup-alpine` is what configures it. To test
@@ -810,12 +811,45 @@ The order to try things in, cheapest first:
 
 ### Cleaning up — disk space, and the files that carry your name
 
+Everything generated lands under **`build/`**, so the repository root holds only
+files that are tracked. Inside it are two things with two different lifetimes,
+and the clean targets treat them differently:
+
+```
+build/
+  copal-vm.img              images, and the EFI variable stores beside them
+  copal-prep-auto.log       build transcripts
+  cache/                    checksum-verified Alpine payloads, GRUB ISOs
+```
+
+| | Costs | Removed by |
+|---|---|---|
+| **`build/`**, minus the cache | CPU and time — rebuild it | `make clean` |
+| **`build/cache/`** | bandwidth — re-download it, ~800 MB per architecture | `make distclean` |
+
+Both are created on demand, `build/` is one line in `.gitignore`, and
+`copal-prep.sh` takes `BUILDDIR` and `CACHEDIR` if you want either elsewhere.
+`WORKDIR` still works — it is the old name for `CACHEDIR`.
+
+The distinction matters more than the tidiness. `make clean` should be cheap
+enough to run without thinking, and it is not if it throws away 1.8 GB of
+verified downloads every time. So clean removes *everything in `build/` except
+`cache/`* — and note the shape of that rule: it is an exclusion of one name,
+not a list of things to remove. Anything a future target drops into `build/` is
+cleaned by default, without anyone remembering to add it. The glob list this
+replaced was the opposite, opt-in, which is how transcripts quoting a real name
+and address survived several rounds of cleaning.
+
+Nesting also settled an older bug: one variable used to serve both lifetimes,
+and `attach_image` defaulted a disk image *into the download cache*, so a rule
+that emptied the cache could have taken a finished two-hour install with it.
+
 Three levels, and what separates them is the cost of undoing them.
 
 ```sh
 make space        # removes nothing. Says what is here and which target takes it
-make clean        # build output, logs, and the generated config. Costs a rebuild
-make distclean    # clean, and the payloads too. Costs a re-download as well
+make clean        # empties build/, keeping build/cache. Costs a rebuild
+make distclean    # clean, and the cache with it. Costs a re-download too
 ```
 
 `make space` is the one to run first, because the numbers are not what `ls`
@@ -829,13 +863,13 @@ WHAT IS IN THIS FOLDER
   Measured with du -- what is on disk, not what ls claims. The images
   are sparse: 64 GB apparent, and only what has been written to them.
 
-  Disk images and EFI stores               1.5G   make clean
-  Logs and build transcripts               120K   make clean
-  Generated config -- identity               --   nothing here
-  macOS metadata                             --   nothing here
-  Verified Alpine downloads                1.8G   make distclean
+  build/ -- images, EFI, logs             1.0G   make clean
+  build/cache/ -- Alpine downloads        1.8G   make distclean
+  Left loose by older builds                --   nothing here
+  Generated config -- identity              --   nothing here
+  macOS metadata                           12K   make clean
 
-  Everything above                         3.4G   make distclean
+  Everything above                        2.8G   make distclean
 
   Registered UTM machines live in UTM's own container, not here, and
   no make target touches them: utm/utm-vm.sh delete --target aarch64
@@ -845,7 +879,7 @@ WHAT IS IN THIS FOLDER
 only what has actually been written to it — about 550 MB fresh, 15–25 GB after
 a full fifteen-stage run. Every size above is `du`, the real one. Reporting the
 ceiling would make each of those numbers wrong by two orders of magnitude, and
-`ls -lh copal-vm.img` is why people think this repository eats their disk.
+`ls -lh build/copal-vm.img` is why people think this repository eats their disk.
 
 **`make clean` removes more than build output, on purpose.** Alongside the
 images and the EFI variable stores it removes the small generated files that
@@ -872,18 +906,23 @@ attachment, or a `cp -r` of the folder onto a shared disk.
 
 ```console
 $ make clean
-==> Removed the images, EFI variable stores, logs and the
-    generated config that carried the identity. 1.6G reclaimed.
-    work/ kept -- verified payloads, and a download to replace. make distclean
+==> Purged build/ -- images, EFI variable stores and
+    transcripts -- along with any generated config that carried the
+    identity. 1.0G reclaimed.
+    build/cache/ kept -- verified payloads, and a download to replace.
+    make distclean takes it too.
     UTM machines kept -- utm/utm-vm.sh delete --target aarch64
 ```
 
-**What it does not touch.** `work/` holds the checksum-verified Alpine payloads
-and the GRUB ISOs — about 1.8 GB, and the only thing here that costs bandwidth
-rather than CPU to replace, which is why it belongs to `make distclean` and not
-to `make clean`. Registered UTM machines live in UTM's own sandbox container
-rather than in this folder, and no make target deletes one: use
+**What it does not touch**, and says so rather than leaving you to find out.
+Registered UTM machines live in UTM's own sandbox container rather than in this
+folder, and no make target deletes one — use
 `utm/utm-vm.sh delete --target aarch64`.
+
+The *Left loose by older builds* row exists because a working copy made before
+`build/` did will still have images and transcripts in the root and a top-level
+`work/`. `make clean` removes those too, so there is never a half-cleaned folder
+holding one layout's leftovers.
 
 ---
 
@@ -1113,7 +1152,7 @@ which is a worse failure for being silent.
 Lower it freely for a test image that will never run past stage 4:
 
 ```sh
-IMAGE_SIZE=12g MODEL=vm ./copal-prep.sh --fresh --image test.img
+IMAGE_SIZE=12g MODEL=vm ./copal-prep.sh --fresh --image build/test.img
 ```
 
 The full account of what those stages do — the catalogue, the desktop, the key
@@ -1129,6 +1168,8 @@ bindings, the account model, the SD-card wear analysis — is in
 | `copal-vm.sh` | Boots a prepared image under QEMU. `--check` boots headless and reports a verdict — **the automated verification path** |
 | `utm/utm-vm.sh` | Wraps a prepared image in a UTM VM: NAT, shared folder, UEFI boot — **the interactive path** |
 | `Makefile` | Names the combinations worth having a name for, and verifies the host. `make configure`, `make fresh`, `make vm`, `make check`, `make space`, `make clean` |
+| `build/` | Everything generated: images, EFI variable stores, transcripts. Created on demand, ignored by git, emptied by `make clean` |
+| `build/cache/` | The download cache: checksum-verified Alpine payloads and GRUB ISOs. Survives `make clean`, removed by `make distclean` |
 | `fetch-minivmac.sh` | Assembles the Mini vMac working set on demand — nothing binary is tracked here |
 | `tools/minivmac/` | Mini vMac launcher scripts |
 | `docs/copal-handbook.md` | The original Copal handbook. Alpine, the card, the stages, the desktop, reference |

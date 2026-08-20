@@ -11,22 +11,37 @@
 #   make img-pc        write a bootable disk image for a PC
 #   make lint          syntax-check both scripts, including the generated one
 #   make space         what is here, what it costs, and which target removes it
-#   make clean         images, EFI stores, logs, and the config carrying the identity
+#   make clean         empties build/, keeping build/cache. Reports what it freed
+#   make distclean     clean, and the download cache with it
 #
 # Run `make` on its own for the full list.
 
-IMG      ?= copal-vm.img
+# Everything generated lands under one directory, so the repository root holds
+# only files that are tracked. copal-prep.sh takes BUILDDIR too, so an image
+# written by the script and one written by make land in the same place.
+#
+# The cache lives inside it, at build/cache -- but the two are not the same
+# thing and the clean targets treat them differently. Build output is worthless
+# to anyone else and reproduced by building again; the cache is checksum-
+# verified Alpine payloads that cost bandwidth rather than CPU to replace. So
+# `make clean` empties build/ while stepping around the cache, and only
+# `make distclean` takes both. See the cleaning section for how, and why the
+# exclusion is written as an exclusion rather than a list.
+BUILDDIR ?= build
+CACHEDIR ?= $(BUILDDIR)/cache
+
+IMG      ?= $(BUILDDIR)/copal-vm.img
 MODEL    ?= vm
 MEM      ?= 2048
 CPUS     ?= 2
-LOG      ?= copal-vm-check.log
-AUTOLOG  ?= copal-prep-auto.log
+LOG      ?= $(BUILDDIR)/copal-vm-check.log
+AUTOLOG  ?= $(BUILDDIR)/copal-prep-auto.log
 
 PREP     := ./copal-prep.sh
 VMRUN    := ./copal-vm.sh
 VARS      = $(IMG:.img=-efivars.fd)
 
-export MEM CPUS
+export MEM CPUS BUILDDIR CACHEDIR
 
 # Board names are copal-prep.sh's, not a second vocabulary invented here: the
 # stem goes straight through as MODEL, so `make sd-nonsense` gets that script's
@@ -80,13 +95,19 @@ help:
 	@printf '  make space      what is taking up room and which target removes it. Removes nothing\n'
 	@printf '  make clean      the images, EFI stores, logs, and the generated config that\n'
 	@printf '                  carries the git identity, username and SSH key. Reports what it freed\n'
-	@printf '  make distclean  clean, and the verified Alpine payloads in work/ as well\n'
+	@printf '  make distclean  clean, and the verified Alpine payloads in %s as well\n' '$(CACHEDIR)/'
 	@printf '\n'
 	@printf '  Variables: IMG MODEL MEM CPUS LOG   e.g.  make vm MEM=4096 CPUS=4\n\n'
 	@printf '  \033[33mAn existing image is never rebuilt by `make vm`.\033[0m An interrupted install\n'
 	@printf '  leaves copal-auto on the boot partition and resumes from there, so a\n'
 	@printf '  half-finished image boots into the middle of stage 1 and skips what came\n'
 	@printf '  before. Use `make fresh` whenever the result is meant to mean something.\n\n'
+
+# The directory has to exist before script(1) can open a transcript in it, and
+# an order-only prerequisite is the way to say "make sure it is there" without
+# a fresh mtime on it counting as a reason to rebuild an image.
+$(BUILDDIR):
+	@mkdir -p $(BUILDDIR)
 
 # ------------------------------------------------------------- front door ---
 #
@@ -187,7 +208,7 @@ vm: image
 graphical: image
 	$(VMRUN) --graphical $(IMG)
 
-check: image
+check: image | $(BUILDDIR)
 	$(VMRUN) --check --log $(LOG) $(IMG)
 
 # --------------------------------------------------------------- building ---
@@ -198,10 +219,10 @@ check: image
 # the explicit way to say that, and the warning in `make help` says so.
 image: $(IMG)
 
-$(IMG): | require-tools
+$(IMG): | require-tools $(BUILDDIR)
 	MODEL=$(MODEL) $(PREP) --image $(IMG)
 
-fresh: | require-tools
+fresh: | require-tools $(BUILDDIR)
 	MODEL=$(MODEL) $(PREP) --fresh --image $(IMG)
 	@printf '\n\033[36m==>\033[0m Built. Boot it with: make vm   (or: make check)\n'
 
@@ -223,7 +244,7 @@ fresh: | require-tools
 # calls that set the MBR type bytes get no password this way, so 0xEF and 0x83
 # stay unset. The image boots regardless -- EDK2 finds BOOTAA64.EFI by scanning
 # the FAT filesystem -- but it is not byte-identical to an attended build.
-auto: | require-tools
+auto: | require-tools $(BUILDDIR)
 	@printf '\033[36m==>\033[0m Unattended build of $(IMG). Step gates answered automatically.\n'
 	@printf '    Transcript: $(AUTOLOG)\n'
 	@yes '' | script -q $(AUTOLOG) env MODEL=$(MODEL) $(PREP) --fresh --image $(IMG) \
@@ -247,10 +268,10 @@ sd-%: | require-tools
 
 # The same board, written to a file. Named for the board so several can coexist
 # -- copal-zero2.img beside copal-pc.img -- rather than all colliding on IMG.
-img-%: | require-tools
-	MODEL=$(call model_of,$*) $(PREP) --image copal-$(call model_of,$*).img
+img-%: | require-tools $(BUILDDIR)
+	MODEL=$(call model_of,$*) $(PREP) --image $(BUILDDIR)/copal-$(call model_of,$*).img
 
-fresh-img-%: | require-tools
+fresh-img-%: | require-tools $(BUILDDIR)
 	MODEL=$(call model_of,$*) $(PREP) --fresh --image copal-$(call model_of,$*).img
 
 # --------------------------------------------------------------- checking ---
@@ -258,18 +279,18 @@ fresh-img-%: | require-tools
 # copal-init.sh only exists as a heredoc until a card is written, so a syntax
 # error in it survives every check that reads copal-prep.sh alone -- and lands
 # on the hardware. Extract it and check it as the file it becomes.
-lint:
+lint: | $(BUILDDIR)
 	@sh -n $(PREP) && printf '  ok      copal-prep.sh\n'
 	@sh -n $(VMRUN) && printf '  ok      copal-vm.sh\n'
 	@sh -n fetch-minivmac.sh && printf '  ok      fetch-minivmac.sh\n'
 	@sed -n "/^cat > \"\$$MNT\/copal-init.sh\" <<'COPALINIT'$$/,/^COPALINIT$$/p" $(PREP) \
-	    | sed '1d;$$d' > .copal-init.lint.sh
-	@test -s .copal-init.lint.sh \
+	    | sed '1d;$$d' > $(BUILDDIR)/.copal-init.lint.sh
+	@test -s $(BUILDDIR)/.copal-init.lint.sh \
 	    || { printf '\033[31merror:\033[0m could not extract copal-init.sh from $(PREP)\n'; \
-	         rm -f .copal-init.lint.sh; exit 1; }
-	@sh -n .copal-init.lint.sh \
-	    && printf '  ok      copal-init.sh (generated, %s lines)\n' "$$(wc -l < .copal-init.lint.sh | xargs)"
-	@rm -f .copal-init.lint.sh
+	         rm -f $(BUILDDIR)/.copal-init.lint.sh; exit 1; }
+	@sh -n $(BUILDDIR)/.copal-init.lint.sh \
+	    && printf '  ok      copal-init.sh (generated, %s lines)\n' "$$(wc -l < $(BUILDDIR)/.copal-init.lint.sh | xargs)"
+	@rm -f $(BUILDDIR)/.copal-init.lint.sh
 
 # --------------------------------------------------------------- cleaning ---
 #
@@ -300,33 +321,42 @@ lint:
 # fresh, 15-25 GB after a full fifteen-stage run. Reporting the ceiling would
 # make every one of these numbers a lie by two orders of magnitude.
 
-# Build output. Reproduced by building again.
-BUILT    = $(IMG) $(VARS) copal-*.img copal-*-efivars.fd efivars.fd \
-           .copal-init.lint.sh
-# Transcripts. *.log covers them all; the two named ones are spelled out
-# because they are the ones that quote the identity.
-LOGS     = $(LOG) $(AUTOLOG) copal-prep-auto*.log copal-vm-check.log \
-           run-log-*.txt *.log
+# Everything in $(BUILDDIR) that is NOT the cache. Note what this is: an
+# exclusion of one name, not a list of things to remove. Anything a future
+# target drops into build/ is cleaned by default and nobody has to remember to
+# add it here -- which is the property the old glob list never had, and how
+# transcripts quoting a real name survived several rounds of cleaning.
+#
+# find, because a shell glob cannot express "except". -mindepth/-maxdepth 1 so
+# it names the entries and not their contents; rm -rf does the recursion.
+FIND_BUILT = find $(BUILDDIR) -mindepth 1 -maxdepth 1 ! -name cache 2>/dev/null
+# The same output, in the places versions before build/ existed left it -- the
+# repository root, and a top-level work/. Kept so an existing working copy gets
+# genuinely cleaned rather than half-cleaned.
+LEGACY   = copal-*.img copal-*-efivars.fd efivars.fd .copal-init.lint.sh \
+           copal-prep-auto*.log copal-vm-check.log run-log-*.txt *.log
 # Generated per-machine configuration -- the same list .gitignore carries, and
 # deliberately the same list, so the two cannot drift apart.
 SECRETS  = copal.conf copal-git answers.txt usercfg.txt authorized_keys \
            firstrun.log copal-auto copal-timings
 # Finder droppings. Not big, but they are folder clutter and they travel.
 CRUFT    = .DS_Store ._* .Spotlight-V100 .Trashes
-# The download cache: checksum-verified Alpine payloads and the GRUB ISOs.
-# The only thing here that costs bandwidth rather than CPU to replace, which
-# is why it is distclean's and not clean's.
-CACHE    = work cache
 
-# Set to 0 by distclean, which is about to remove work/ and should not first
-# advise keeping it.
+# Set to 0 by distclean, which is about to remove the cache and should not
+# first advise keeping it.
 CLEAN_HINT ?= 1
 
-# du over whatever of $(1) actually exists, or a dash. Printed, not deleted.
-# `ls -d` filters the globs down to real paths first: `du` with no arguments
-# would size the whole folder and report a number that is spectacularly wrong.
+# $(call) splits its arguments on commas, so a literal one has to arrive as a
+# variable. Only used by the size_row labels.
+comma := ,
+
+# One row of the space report. Argument 2 is a SHELL COMMAND that prints paths,
+# one per line -- not a glob -- because "everything except the cache" cannot be
+# written as a glob and every row should go through the same code.
+#
+# du and never ls: the images are sparse, and ls reports the ceiling.
 define size_row
-	@_f=$$(ls -d $(2) 2>/dev/null); \
+	@_f=$$($(2)); \
 	if [ -n "$$_f" ]; then \
 	    printf '  %-34s %9s   \033[2m%s\033[0m\n' '$(1)' \
 	        "$$(du -shc $$_f 2>/dev/null | tail -n1 | cut -f1)" '$(3)'; \
@@ -339,39 +369,56 @@ space:
 	@printf '\n\033[1mWHAT IS IN THIS FOLDER\033[0m\n\n'
 	@printf '  \033[2m%s\033[0m\n' 'Measured with du -- what is on disk, not what ls claims. The images'
 	@printf '  \033[2m%s\033[0m\n\n' 'are sparse: 64 GB apparent, and only what has been written to them.'
-	$(call size_row,Disk images and EFI stores,$(BUILT),make clean)
-	$(call size_row,Logs and build transcripts,$(LOGS),make clean)
-	$(call size_row,Generated config -- identity,$(SECRETS),make clean)
-	$(call size_row,macOS metadata,$(CRUFT),make clean)
-	$(call size_row,Verified Alpine downloads,$(CACHE),make distclean)
+	$(call size_row,$(BUILDDIR)/ -- images$(comma) EFI$(comma) logs,$(FIND_BUILT),make clean)
+	$(call size_row,$(CACHEDIR)/ -- Alpine downloads,ls -d $(CACHEDIR) 2>/dev/null,make distclean)
+	$(call size_row,Left loose by older builds,ls -d $(LEGACY) work 2>/dev/null,make clean)
+	$(call size_row,Generated config -- identity,ls -d $(SECRETS) 2>/dev/null,make clean)
+	$(call size_row,macOS metadata,ls -d $(CRUFT) 2>/dev/null,make clean)
 	@printf '\n'
-	$(call size_row,Everything above,$(BUILT) $(LOGS) $(SECRETS) $(CRUFT) $(CACHE),make distclean)
+	$(call size_row,Everything above,ls -d $(BUILDDIR) $(LEGACY) work $(SECRETS) $(CRUFT) 2>/dev/null,make distclean)
 	@printf '\n  \033[2m%s\033[0m\n' 'Registered UTM machines live in UTM'"'"'s own container, not here, and'
 	@printf '  \033[2m%s\033[0m\n\n' 'no make target touches them: utm/utm-vm.sh delete --target aarch64'
 
+# work/ is in the removal list because that is where the cache used to live,
+# at the top level. A working copy from before the move keeps it, and leaving
+# it behind would mean two caches and a confusing space report.
 clean:
-	@_f=$$(ls -d $(BUILT) $(LOGS) $(SECRETS) $(CRUFT) 2>/dev/null); \
+	@_f=$$($(FIND_BUILT); ls -d $(LEGACY) work $(SECRETS) $(CRUFT) 2>/dev/null); \
 	if [ -z "$$_f" ]; then \
 	    printf '\033[36m==>\033[0m Already clean -- nothing to remove.\n'; \
 	else \
 	    _sz=$$(du -shc $$_f 2>/dev/null | tail -n1 | cut -f1); \
 	    rm -rf $$_f; \
 	    rmdir logs 2>/dev/null || true; \
-	    printf '\033[36m==>\033[0m Removed the images, EFI variable stores, logs and the\n'; \
-	    printf '    generated config that carried the identity. \033[1m%s reclaimed.\033[0m\n' "$$_sz"; \
+	    printf '\033[36m==>\033[0m Purged \033[1m%s/\033[0m -- images, EFI variable stores and\n' '$(BUILDDIR)'; \
+	    printf '    transcripts -- along with any generated config that carried the\n'; \
+	    printf '    identity. \033[1m%s reclaimed.\033[0m\n' "$$_sz"; \
 	fi
 	@[ "$(CLEAN_HINT)" = 1 ] || exit 0; \
-	if [ -d work ] || [ -d cache ]; then \
-	    printf '    \033[2m%s\033[0m\n' 'work/ kept -- verified payloads, and a download to replace. make distclean'; \
+	if [ -d $(CACHEDIR) ]; then \
+	    printf '    \033[2m%s\033[0m\n' '$(CACHEDIR)/ kept -- verified payloads, and a download to replace.'; \
+	    printf '    \033[2m%s\033[0m\n' 'make distclean takes it too.'; \
 	fi; \
 	printf '    \033[2m%s\033[0m\n' 'UTM machines kept -- utm/utm-vm.sh delete --target aarch64'
 
 # Recursive rather than a plain prerequisite, so clean can be told to skip the
-# "work/ kept" hint -- printing it one line before removing work/ would be a
-# small lie, and the hints are the reason anyone reads this output at all.
+# "cache kept" hint -- printing it one line before removing the cache would be
+# a small lie, and the hints are the reason anyone reads this output at all.
+#
+# The case is a de-duplication, not a formality. By default CACHEDIR sits
+# INSIDE BUILDDIR, and naming both to `du -shc` counts the cache twice: the
+# first run of this reported 50M for a 25M cache. Since clean has already
+# emptied everything else, the size of BUILDDIR alone is the size of the cache
+# -- and CACHEDIR is only named separately when someone has moved it out.
+#
+# The patterns are written (build/*) rather than build/*) on purpose: make
+# collapses this recipe onto one line, and a bare case pattern's unbalanced ')'
+# inside $( ) is a syntax error in bash. The leading paren is POSIX and it
+# balances.
 distclean:
 	@$(MAKE) --no-print-directory clean CLEAN_HINT=0
-	@_f=$$(ls -d $(CACHE) 2>/dev/null); \
+	@_f=$$(ls -d $(BUILDDIR) 2>/dev/null; \
+	       case "$(CACHEDIR)/" in ($(BUILDDIR)/*) ;; (*) ls -d $(CACHEDIR) 2>/dev/null ;; esac); \
 	if [ -z "$$_f" ]; then \
 	    printf '\033[36m==>\033[0m No downloaded payloads to remove.\n'; \
 	else \

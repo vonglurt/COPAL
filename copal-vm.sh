@@ -80,12 +80,15 @@ done
        It ships with QEMU:  brew install qemu"
 
 if [ -z "$IMAGE" ]; then
-    for candidate in copal-vm.img work/copal-vm.img work/copal-vm64.img; do
+    # build/ first: it is where copal-prep.sh puts an image now. The rest are
+    # the places earlier versions left one, kept so an existing image is found
+    # rather than silently rebuilt.
+    for candidate in build/copal-vm.img copal-vm.img work/copal-vm.img work/copal-vm64.img; do
         [ -f "$candidate" ] && { IMAGE="$candidate"; break; }
     done
 fi
 [ -n "$IMAGE" ] || die "no image found. Make one with:
-       MODEL=vm ./copal-prep.sh --image copal-vm.img
+       MODEL=vm ./copal-prep.sh --image build/copal-vm.img
        or name one:  ./copal-vm.sh path/to/image.img"
 [ -f "$IMAGE" ] || die "no such image: $IMAGE"
 

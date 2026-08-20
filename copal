@@ -397,7 +397,7 @@ handover() {
     say ""
     say "  This hands over to:   ${C}MODEL=${k} ./copal-prep.sh${Z}"
     case "$k" in
-        vm) say "  Suggested, for a VM:  ${C}MODEL=vm ./copal-prep.sh --image copal-vm.img${Z}" ;;
+        vm) say "  Suggested, for a VM:  ${C}MODEL=vm ./copal-prep.sh --image build/copal-vm.img${Z}" ;;
     esac
     say ""
     say "  ${D}That script asks its own questions, and stops before every${Z}"
@@ -412,7 +412,7 @@ handover() {
             say "${C}==>${Z} Starting copal-prep.sh for ${B}${label}${Z}..."
             say ""
             if [ "$k" = vm ]; then
-                MODEL="$k" exec "$PREP" --image copal-vm.img
+                MODEL="$k" exec "$PREP" --image build/copal-vm.img
             else
                 MODEL="$k" exec "$PREP"
             fi

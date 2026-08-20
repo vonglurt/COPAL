@@ -8,7 +8,15 @@
 # published SHA256; fetch-minivmac.sh assembles the Mini vMac set on demand. The
 # binaries were always a convenience, never a dependency.
 
-# Downloads and scratch
+# Everything generated. One line, because everything generated lands under
+# build/ -- images, EFI variable stores, transcripts, and build/cache/ holding
+# the checksum-verified Alpine payloads. The two have different lifetimes and
+# make treats them differently (`make clean` empties build/ but steps around
+# the cache; `make distclean` takes both), but neither is ever committed.
+build/
+
+# Where the cache lived before it moved under build/. Kept ignored so an older
+# working copy cannot stage 1.8 GB of payloads by accident.
 work/
 cache/
 
