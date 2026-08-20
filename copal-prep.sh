@@ -1745,18 +1745,45 @@ menuentry "Copal Linux (lts -- real hardware)" {
     linux /boot/vmlinuz-lts modules=loop,squashfs,sd-mod,usb-storage,ahci,nvme,mmc_block,sdhci,sdhci_pci rootfstype=tmpfs console=tty0
     initrd /boot/initramfs-lts
 }
+GRUBCFG
+
+# The virt entry only where that flavour exists, which is not everywhere.
+#
+# Alpine builds vmlinuz-virt for x86_64 and aarch64 but NOT for 32-bit x86 --
+# the netboot tarball there carries lts alone. This block used to name it
+# unconditionally, and a menu entry pointing at a kernel that is not on the
+# card is not a harmless spare: the boot-file check further down refuses the
+# whole card, correctly, rather than hand you something that drops to a GRUB
+# rescue prompt. That is why MODEL=pc32 could never finish, and it failed the
+# same way every time it was tried.
+#
+# Tested against the payload rather than against a list of architectures, so a
+# release that starts or stops shipping a flavour needs no change here.
+_virt_entry=0
+if [ -f "$MNT/boot/vmlinuz-virt" ] && [ -f "$MNT/boot/initramfs-virt" ]; then
+    _virt_entry=1
+    cat >> "$MNT/boot/grub/grub.cfg" <<'GRUBCFG'
 
 menuentry "Copal Linux (virt -- virtual machines)" {
     linux /boot/vmlinuz-virt modules=loop,squashfs,sd-mod,usb-storage,virtio_blk,virtio_pci rootfstype=tmpfs console=tty0
     initrd /boot/initramfs-virt
 }
+GRUBCFG
+fi
+
+cat >> "$MNT/boot/grub/grub.cfg" <<'GRUBCFG'
 
 menuentry "Copal Linux (lts, serial console on ttyS0)" {
     linux /boot/vmlinuz-lts modules=loop,squashfs,sd-mod,usb-storage,ahci,nvme,mmc_block,sdhci,sdhci_pci rootfstype=tmpfs console=tty0 console=ttyS0,115200
     initrd /boot/initramfs-lts
 }
 GRUBCFG
-info "Wrote boot/grub/grub.cfg (lts default, virt and serial alternatives)"
+if [ "$_virt_entry" -eq 1 ]; then
+    info "Wrote boot/grub/grub.cfg (lts default, virt and serial alternatives)"
+else
+    info "Wrote boot/grub/grub.cfg (lts default, serial alternative)"
+    info "no vmlinuz-virt for $ARCH -- Alpine ships lts only here, so that entry is omitted"
+fi
 
 fi   # end of the VM / bare-metal grub.cfg choice
 
