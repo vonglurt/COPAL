@@ -558,6 +558,20 @@ cmd_build_all() {
     cmd_cache all || return 1
     _failed=''; _built=0
     for _b in $(board_keys); do
+        # BETWEEN boards, not only before the first. copal-prep.sh releases its
+        # image on exit now, success or failure, so this should never find
+        # anything -- but "should never" is what the last run said too, and the
+        # cost of being wrong is every remaining board failing for a reason
+        # that belongs to an earlier one. Cheap check, loud stop.
+        if mount | grep -q ' /Volumes/COPALBOOT'; then
+            say "${R}error:${Z} /Volumes/COPALBOOT is still mounted before building $_b."
+            say "       Something did not clean up after itself. Stopping rather than"
+            say "       failing every remaining board for somebody else's reason:"
+            mount | grep ' /Volumes/COPALBOOT' | sed 's/^/         /' >&2
+            say "       Clear it with:  hdiutil detach /dev/diskN"
+            _failed="$_failed $_b(+the rest)"
+            break
+        fi
         _out=$(img_for "$_b")
         say "${C}==>${Z} ${B}$_b${Z} -> $_out"
         if build_unattended "$_b" "$_out" "$BUILDDIR/copal-prep-auto-$_b.log"; then
