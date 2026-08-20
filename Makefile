@@ -62,6 +62,8 @@ help:
 	@printf '  make flow       the flow chart alone\n'
 	@printf '  make targets    the target list, one per line   \033[2m(make boards is the same)\033[0m\n'
 	@printf '  make configure  what this Mac has and what it is missing. Ends in a verdict\n'
+	@printf '  bin/ls.sh       the same targets as one-line shell shortcuts, runnable\n'
+	@printf '                  from any directory   \033[2m(bin/vm.sh, bin/sd.sh zero2, ...)\033[0m\n'
 	@printf '\n'
 	@printf '\033[1m  Booting the VM\033[0m\n'
 	@printf '  make vm         boot %s, serial console on this terminal\n' '$(IMG)'
@@ -323,6 +325,14 @@ fresh-img-%: | require-tools $(BUILDDIR)
 # copal-init.sh only exists as a heredoc until a card is written, so a syntax
 # error in it survives every check that reads copal-prep.sh alone -- and lands
 # on the hardware. Extract it and check it as the file it becomes.
+#
+# bin/ is checked here too, for the one failure a shortcut can have that is
+# all its own: naming a target this file no longer defines. The shortcuts are
+# two lines each and carry no logic to get wrong, but they do carry a target
+# name, and a name is exactly the kind of thing that goes stale quietly. The
+# check reads the target out of each script's `exec make` line and looks for
+# it among the targets defined below, so renaming one here fails the lint
+# rather than leaving a shortcut that only fails when somebody runs it.
 lint: | $(BUILDDIR)
 	@sh -n $(PREP) && printf '  ok      copal-prep.sh\n'
 	@sh -n $(VMRUN) && printf '  ok      copal-vm.sh\n'
@@ -335,6 +345,22 @@ lint: | $(BUILDDIR)
 	@sh -n $(BUILDDIR)/.copal-init.lint.sh \
 	    && printf '  ok      copal-init.sh (generated, %s lines)\n' "$$(wc -l < $(BUILDDIR)/.copal-init.lint.sh | xargs)"
 	@rm -f $(BUILDDIR)/.copal-init.lint.sh
+	@for _s in bin/*.sh; do sh -n "$$_s" || exit 1; done; \
+	    printf '  ok      bin/*.sh (%s shortcuts)\n' "$$(ls bin/*.sh | wc -l | xargs)"
+	@_names=$$(grep -E '^[A-Za-z0-9_%.-][A-Za-z0-9_%. -]*:' Makefile \
+	           | sed 's/:.*//' | tr ' ' '\n' | sort -u); \
+	_bad=''; \
+	for _s in bin/*.sh; do \
+	    _t=$$(sed -n 's/^exec make "\{0,1\}\([A-Za-z0-9_-]*\).*/\1/p' "$$_s" | head -1); \
+	    [ -n "$$_t" ] || continue; \
+	    case "$$_t" in *-) _t="$${_t}%" ;; esac; \
+	    printf '%s\n' "$$_names" | grep -qx -- "$$_t" \
+	        || _bad="$$_bad $$(basename "$$_s")->$$_t"; \
+	done; \
+	[ -z "$$_bad" ] || { \
+	    printf '\033[31merror:\033[0m shortcut names a target this Makefile does not define:%s\n' "$$_bad"; \
+	    exit 1; }; \
+	printf '  ok      every shortcut names a real target\n'
 
 # --------------------------------------------------------------- cleaning ---
 #
