@@ -36,6 +36,8 @@
 #   utm/utm-vm.sh config  --target x86_64        # print the plist, write nothing
 #   utm/utm-vm.sh progress --target x86_64       # how far the install has got
 #   utm/utm-vm.sh log     --target x86_64        # follow the install transcript
+#   utm/utm-vm.sh layout                         # arrange the VM windows on screen
+#   utm/utm-vm.sh layout --autotype              # ...and log in and start the install
 #
 set -euo pipefail
 
@@ -53,6 +55,11 @@ UTM_DOCS="$HOME/Library/Containers/com.utmapp.UTM/Data/Documents"
 # beside the path is UTM's to create.
 UTM_PREFS="$HOME/Library/Containers/com.utmapp.UTM/Data/Library/Preferences/com.utmapp.UTM.plist"
 
+# Where "layout" writes its AppleScript. Under build/ because it is
+# regenerated from the current screen size on every run and is therefore
+# disposable -- make purge is free to take it.
+UTM_LAYOUT_SCRIPT="${BUILDDIR:-build}/copal-utm-layout.applescript"
+
 ACTION=""
 TARGET=""
 IMAGE=""
@@ -66,15 +73,231 @@ FORCE=0
 # create points the machine at SHARE_DIR by itself. --no-share opts out, for a
 # machine that should reach nothing on this Mac.
 NO_SHARE=0
+# layout only: --autotype logs in as root on both serial consoles and starts
+# the installer. Off by default: placing windows is tidying, starting an
+# install is an hour of work, and the two should not share one command by
+# accident.
+AUTOTYPE=0
+INIT_PATH="/media/vda1/copal-init.sh"
+# layout only: WxH in POINTS, not pixels -- a Retina display reports twice
+# the number AppleScript works in. Empty means ask the window server.
+SCREEN=""
 
-usage() { sed -n '5,33p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '5,40p' "$0" | sed 's/^# \{0,1\}//'; }
 
 [ $# -gt 0 ] || { usage; exit 0; }
 ACTION="$1"; shift
+# The AppleScript, written out rather than kept inline, because the file IS
+# the interface when the direct route is refused: someone is going to read it
+# before granting it control of their desktop. The header says what it does,
+# and the geometry is derived from the real screen size rather than baked in.
+_layout_script() {
+    local _w="$1" _h="$2" _autotype="${3:-0}" _initpath="${4:-/media/vda1/copal-init.sh}"
+    cat <<APPLESCRIPT
+-- Arrange the Copal VM windows. Written by utm/utm-vm.sh layout.
+--
+-- WHAT THIS DOES, so you can check it before granting anything: it reads
+-- UTM's window list and sets the position and size of up to four windows. It
+-- does not touch any other application, start or stop a machine, read a file,
+-- or reach the network. Any window whose name does not match is left alone.
+--
+-- Cmd+R to run. macOS asks once whether Script Editor may control System
+-- Events, and again for UTM; both are needed to move another app's windows.
+-- If it runs but nothing moves, tick Script Editor in
+-- System Settings -> Privacy & Security -> Accessibility.
+
+set screenW to $_w
+set screenH to $_h
+
+-- The serial consoles: flush into the bottom corners, fully visible. These
+-- are the ones the install is watched in, so they lose nothing off an edge.
+set termW to 700
+set termH to 430
+set termY to screenH - termH
+
+-- The graphical consoles: pushed down until only the title bar is left, and
+-- overlapped horizontally so both stay grabbable. Out of the way, one click
+-- from being back.
+set grafW to 640
+set grafH to 500
+set grafY to screenH - 46
+
+set placed to {}
+set skipped to {}
+
+tell application "System Events"
+	if not (exists process "UTM") then return "UTM is not running -- nothing to place."
+	tell process "UTM"
+		repeat with w in windows
+			set n to name of w
+			if n contains "aarch64" and n contains "Term" then
+				set position of w to {0, termY}
+				set size of w to {termW, termH}
+				set end of placed to "  bottom-left   " & n
+			else if n contains "x86_64" and n contains "Term" then
+				set position of w to {screenW - termW, termY}
+				set size of w to {termW, termH}
+				set end of placed to "  bottom-right  " & n
+			else if n is "Copal-aarch64" then
+				set size of w to {grafW, grafH}
+				set position of w to {780, grafY}
+				set end of placed to "  off-bottom    " & n
+			else if n is "Copal-x86_64" then
+				set size of w to {grafW, grafH}
+				set position of w to {900, grafY + 22}
+				set end of placed to "  off-bottom    " & n
+			else
+				set end of skipped to "  " & n
+			end if
+		end repeat
+	end tell
+end tell
+
+-- ---------------------------------------------------------------- autotype --
+-- Only if AUTOTYPE is 1. The windows are placed either way; starting an
+-- install is a separate decision from tidying the desktop, and running it by
+-- accident costs an hour.
+--
+-- What it types, into each serial console: "root", Enter -- the account has a
+-- blank password until stage 1 sets one -- then the path to the installer.
+-- Then it stops. Everything after that is answered inside the guest from
+-- answers.txt, which is far steadier than timing keystrokes against a stage
+-- that can take twenty minutes on the emulated x86_64 machine.
+--
+-- Keystrokes go to whichever window is frontmost, so each console is raised
+-- first and given a moment to actually come forward.
+on driveConsole(winName, initPath)
+	tell application "System Events" to tell process "UTM"
+		set matched to false
+		repeat with w in windows
+			if name of w is winName then
+				perform action "AXRaise" of w
+				set matched to true
+				exit repeat
+			end if
+		end repeat
+		if not matched then return "  not found: " & winName
+		delay 1.5
+		keystroke "root"
+		keystroke return
+		delay 2
+		keystroke "sh " & initPath
+		keystroke return
+	end tell
+	return "  started: " & winName
+end driveConsole
+
+set typed to {}
+if $_autotype is 1 then
+	set consoles to {}
+	tell application "System Events" to tell process "UTM"
+		repeat with w in windows
+			set n to name of w
+			if n contains "Term" and (n contains "aarch64" or n contains "x86_64") then
+				set end of consoles to n
+			end if
+		end repeat
+	end tell
+	repeat with n in consoles
+		set end of typed to my driveConsole(n as text, "$_initpath")
+	end repeat
+end if
+
+set AppleScript's text item delimiters to return
+set r to "placed:" & return & (placed as text)
+if (count of skipped) > 0 then set r to r & return & "left alone:" & return & (skipped as text)
+if (count of typed) > 0 then set r to r & return & "autotype:" & return & (typed as text)
+return r
+APPLESCRIPT
+}
+
+# ------------------------------------------------------------- the layout ---
+# Four windows come out of two running machines -- a serial console and a
+# graphical console each -- and UTM opens them stacked on top of one another
+# wherever it likes. This puts them where they are useful: the two serial
+# consoles flush into the bottom corners where the install can be watched, and
+# the two graphical consoles pushed down off the bottom edge, overlapping, so
+# they are out of the way but still clickable when i3 is worth looking at.
+#
+# THE PERMISSION, which is the whole difficulty. Moving another application's
+# windows goes through the Accessibility API, and macOS grants that per
+# SENDING process. A terminal is a bad sender: the grant is recorded against
+# the terminal binary, prompts do not always appear, and a denial is
+# remembered with no way to ask again -- 'tccutil reset' did not clear it here.
+# Script Editor is a good sender. It is Apple-signed, it has its own clean
+# permission record, and it prompts reliably.
+#
+# So this tries the direct route, and when that is refused it hands the script
+# to Script Editor for YOU to read and run. That is not only a workaround: a
+# script that is about to be granted control of your desktop is a script worth
+# reading first, and the file it opens says at the top exactly what it touches.
+do_layout() {
+    command -v osascript >/dev/null 2>&1 || die "osascript not found -- this action is macOS only"
+
+    # Points, not pixels. Finder answers this without needing a grant of its
+    # own, which is why the size is not asked of System Events along with
+    # everything else.
+    local _w _h
+    if [ -n "$SCREEN" ]; then
+        case "$SCREEN" in
+            *x*) _w="${SCREEN%x*}"; _h="${SCREEN#*x}" ;;
+            *) die "--screen wants WxH in points, e.g. --screen 2240x1260" ;;
+        esac
+    else
+        local _b
+        _b=$(osascript -e 'tell application "Finder" to get bounds of window of desktop' 2>/dev/null) || true
+        _w=$(printf '%s' "$_b" | awk -F', *' '{print $3}')
+        _h=$(printf '%s' "$_b" | awk -F', *' '{print $4}')
+    fi
+    case "${_w:-}${_h:-}" in
+        ''|*[!0-9]*) die "could not read the screen size. Give it: --layout --screen 2240x1260" ;;
+    esac
+    info "Screen is ${_w}x${_h} points"
+
+    local _script="$UTM_LAYOUT_SCRIPT"
+    mkdir -p "$(dirname "$_script")"
+    _layout_script "$_w" "$_h" "$AUTOTYPE" "$INIT_PATH" > "$_script"
+
+    # The direct route. Silent about how it failed unless it did.
+    local _out _rc=0
+    _out=$(osascript "$_script" 2>&1) || _rc=$?
+    if [ "$_rc" -eq 0 ]; then
+        printf '%s\n' "$_out" | sed 's/^/    /'
+        info "Windows placed."
+        return 0
+    fi
+
+    case "$_out" in
+        *-1743*|*'not authorized'*|*'not allowed'*|*1002*)
+            warn "This terminal is not allowed to move windows (macOS denied it)."
+            note ""
+            note "Opening the script in Script Editor instead. Read it -- it says at"
+            note "the top what it touches -- then press Cmd+R. Approve the prompts for"
+            note "System Events and UTM; that is the grant this terminal cannot get."
+            [ "$AUTOTYPE" -eq 1 ] && {
+                note ""
+                note "This one also TYPES: it logs in as root on both serial consoles"
+                note "and starts the installer. Worth reading before you run it."
+            }
+            note ""
+            note "If it runs but nothing moves, tick Script Editor in System Settings"
+            note "-> Privacy & Security -> Accessibility."
+            note ""
+            note "  $_script"
+            open -a "Script Editor" "$_script" \
+                || die "could not open Script Editor. Run it by hand: osascript $_script"
+            ;;
+        *)
+            printf '%s\n' "$_out" >&2
+            die "osascript failed. The script is at $_script"
+            ;;
+    esac
+}
+
 case "$ACTION" in
-    create|start|stop|status|delete|refresh|config|ip|log|progress|share) : ;;
+    create|start|stop|status|delete|refresh|config|ip|log|progress|share|layout) : ;;
     -h|--help) usage; exit 0 ;;
-    *) die "unknown action '$ACTION'. One of: create share start stop status delete refresh config ip log progress" ;;
+    *) die "unknown action '$ACTION'. One of: create share start stop status delete refresh config ip log progress layout" ;;
 esac
 
 while [ $# -gt 0 ]; do
@@ -87,6 +310,9 @@ while [ $# -gt 0 ]; do
         --ssh-port) SSH_PORT="${2:-}"; shift 2 ;;
         --share)    SHARE_DIR="${2:-}"; shift 2 ;;
         --net)      NET_MODE="${2:-}"; shift 2 ;;
+        --screen)   SCREEN="${2:-}"; shift 2 ;;
+        --autotype) AUTOTYPE=1; shift ;;
+        --init-path) INIT_PATH="${2:-}"; shift 2 ;;
         --force)    FORCE=1; shift ;;
         --no-share) NO_SHARE=1; shift ;;
         -h|--help)  usage; exit 0 ;;
@@ -158,7 +384,12 @@ case "${TARGET:-}" in
         # to the serial display to log in at all. It costs nothing to leave on.
         PS2=true
         ;;
-    "") die "--target is required: aarch64 or x86_64" ;;
+    # layout arranges whatever UTM has open, on both machines at once, so
+    # it is the one action with nothing to point at. The defaults below
+    # still have to resolve to something -- set -u is on.
+    "") [ "$ACTION" = layout ] \
+            || die "--target is required: aarch64 or x86_64"
+        DEFAULT_NAME=""; DEFAULT_CPUS=2; DEFAULT_SSH=0 ;;
     *)  die "unknown --target '$TARGET'. Use aarch64 or x86_64." ;;
 esac
 
@@ -1066,4 +1297,5 @@ case "$ACTION" in
     ip)      do_ip      ;;
     log)     do_log     ;;
     progress) do_progress ;;
+    layout)  do_layout   ;;
 esac

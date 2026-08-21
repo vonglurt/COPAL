@@ -8,6 +8,9 @@
 #   make fresh         delete the VM image and build it again from nothing
 #   make check         boot headless, print a verdict, exit non-zero if it hung
 #   make utm           register the VM with UTM and start it (utm-x86 for x86_64)
+#   make layout        arrange the four UTM windows on screen
+#   make layout-auto   the same, then log in and start the install
+#   make answers       identity and root password for an unattended install
 #   make sd-zero2      write a physical card for a Pi Zero 2 W
 #   make img-pc        write a bootable disk image for a PC
 #   make lint          syntax-check both scripts, including the generated one
@@ -68,7 +71,7 @@ model_of = $(patsubst pizero%,zero%,$(1))
 .DEFAULT_GOAL := help
 .PHONY: alldebug build-all-debug imagedebug freshdebug purge \
 	help menu flow targets boards configure require-tools vm graphical check \
-        fresh auto image refresh utm utm-x86 lint space clean distclean \
+        fresh auto image refresh utm utm-x86 layout layout-auto answers answers-show lint space clean distclean \
         all cache build-all
 
 help:
@@ -88,6 +91,9 @@ help:
 	@printf '  make check      boot headless, verdict, exit non-zero if no login prompt (log: %s)\n' '$(LOG)'
 	@printf '  make utm        register the aarch64 machine with UTM and start it\n'
 	@printf '  make utm-x86    the same for x86_64 -- \033[33mthe only way to boot that image\033[0m\n'
+	@printf '  make layout     arrange the four VM windows on screen\n'
+	@printf '  make layout-auto  the same, then log in and start the install\n'
+	@printf '  make answers    identity and root password for an unattended install\n'
 	@printf '                  Creates the VM only if there is not one already. Never replaces one.\n'
 	@printf '\n'
 	@printf '\033[1m  Building the VM image\033[0m\n'
@@ -327,6 +333,40 @@ utm: image
 	@$(UTMRUN) start --target aarch64
 	@printf '\033[36m==>\033[0m Started. Find its address with: %s ip --target aarch64\n' '$(UTMRUN)'
 	@printf '    \033[2m%s\033[0m\n' 'Serial console: the VM window toolbar -> Displays -> Serial 1'
+
+# Arrange the four VM windows -- two serial consoles into the bottom corners,
+# the two graphical ones pushed off the bottom edge but still clickable.
+#
+# Moving another app's windows needs an Accessibility grant that macOS records
+# against the SENDING process, and a terminal is a poor sender: the prompt does
+# not reliably appear and a denial is remembered. So when this is refused it
+# opens the script in Script Editor for you to read and run -- which is the
+# right order anyway for a script about to be given control of the desktop.
+layout:
+	@$(UTMRUN) layout
+
+# The same, plus logging in as root on both serial consoles and starting the
+# installer. Separate target rather than a variable, because the difference
+# between the two is "tidy the desktop" and "begin an hour of work".
+layout-auto:
+	@$(UTMRUN) layout --autotype
+
+# Collect the answers an unattended install needs -- identity, login name, and
+# the root password, which is the one thing setup-alpine has no answer-file
+# variable for and so the one thing that has always stopped an unattended
+# install dead.
+#
+# The password is stored as a SHA-512 crypt hash, never in the clear. The
+# default is 'hunter2', which is a joke and meant as one: these VMs are
+# ephemeral, and automated testing wants a password it already knows. Set a
+# real one for anything that outlives an afternoon -- that is what this is for.
+answers:
+	@tools/copal-answers.sh
+
+# What is on file now, with the hash withheld.
+answers-show:
+	@tools/copal-answers.sh --show
+
 
 utm-x86:
 	@$(MAKE) --no-print-directory image MODEL=vmx86

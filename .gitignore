@@ -58,10 +58,18 @@ run-log-*.txt
 # because the cost of being wrong is asymmetric: they carry the git identity
 # read from THIS Mac's git config, the chosen hostname and the admin username.
 #
-# No password is stored in any of them. The identity is not a credential and
-# nothing authenticates with it -- but it is a real name and a real address
-# belonging to whoever wrote the card, and that does not belong in a public
-# repository just because it was convenient to put on a boot partition.
+# The identity is not a credential and nothing authenticates with it -- but it
+# is a real name and a real address belonging to whoever wrote the card, and
+# that does not belong in a public repository just because it was convenient to
+# put on a boot partition.
+#
+# answers.txt is the exception and the reason to be careful: since `make
+# answers` it also carries COPAL_ROOT_PW_HASH, a SHA-512 crypt hash of the root
+# password. A hash is not a password and the file is written 0600, but it is
+# offline-crackable at whatever rate the password deserves, so it is a
+# credential in every way that matters. It has been ignored all along -- listed
+# here since before it held anything sensitive -- which is the only reason
+# adding a hash to it was safe to do.
 copal.conf
 copal-git
 answers.txt

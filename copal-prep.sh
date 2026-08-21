@@ -268,6 +268,35 @@ if [ -n "$_boot_bytes" ]; then
        Use IMAGE_SIZE=$(( _min_bytes / 1024 / 1024 / 1024 ))g or more, or lower BOOT_SIZE."
 fi
 
+# --- answers.txt, if `make answers` has been run -----------------------------
+# The project-root answers.txt is the one place a person is meant to edit. It
+# carries the identity, the login name and -- since it is the whole reason the
+# file exists -- COPAL_ROOT_PW_HASH, which lets stage 1 set the root password
+# without stopping to ask for it.
+#
+# Sourced BEFORE the CFG_ defaults below so that every ${CFG_X:-default} sees
+# it, and sourced only if the environment has not already answered: an explicit
+# CFG_HOSTNAME=foo on the command line still wins over the file, which is the
+# order of precedence every other setting here uses.
+#
+# It is sourced, not parsed, so it can only contain what `make answers` writes.
+# It is also 0600 and gitignored; see the note in .gitignore about why a hash
+# is still a credential.
+COPAL_ANSWERS="${COPAL_ANSWERS:-$(dirname "$0")/answers.txt}"
+if [ -f "$COPAL_ANSWERS" ]; then
+    # shellcheck disable=SC1090
+    . "$COPAL_ANSWERS"
+    info "Read answers from $(basename "$COPAL_ANSWERS")${COPAL_ROOT_PW_HASH:+ (root password set)}"
+    CFG_GIT_NAME="${CFG_GIT_NAME-${COPAL_GIT_NAME-}}"
+    CFG_GIT_EMAIL="${CFG_GIT_EMAIL-${COPAL_GIT_EMAIL-}}"
+    CFG_USER="${CFG_USER:-${COPAL_USER:-}}"
+    CFG_HOSTNAME="${CFG_HOSTNAME:-${COPAL_HOSTNAME:-}}"
+    CFG_TIMEZONE="${CFG_TIMEZONE:-${COPAL_TIMEZONE:-}}"
+    CFG_KEYMAP="${CFG_KEYMAP:-${COPAL_KEYMAP:-}}"
+fi
+CFG_ROOT_PW_HASH="${CFG_ROOT_PW_HASH:-${COPAL_ROOT_PW_HASH:-}}"
+CFG_AUTO_ANSWERS="${CFG_AUTO_ANSWERS:-${COPAL_AUTO:-0}}"
+
 # --- defaults written into the answer file on the card ----------------------
 # setup-alpine reads these non-interactively, so first boot asks almost nothing.
 CFG_KEYMAP="${CFG_KEYMAP:-us us}"
@@ -1609,6 +1638,27 @@ LBUOPTS="${LBU_MEDIA_ANSWER}"
 # only one that exists at this point is the FAT boot partition. copal-init.sh
 # stage 2 formats p2 as ext4 and points the cache there instead.
 APKCACHEOPTS="none"
+
+# ---- Copal's own answers, past the end of what setup-alpine reads ----------
+# setup-alpine sources this file, so unknown variables are simply set and
+# ignored by it -- which makes this the natural place to put the values
+# copal-init.sh needs, rather than inventing a second file for the boot
+# partition search to find.
+#
+# COPAL_ROOT_PW_HASH is the SHA-512 crypt hash of the root password, the same
+# string /etc/shadow holds. Stage 1 applies it with `chpasswd -e` and skips the
+# interactive prompt entirely. Empty means nobody ran `make answers`, and the
+# install asks for a password exactly as it always has.
+#
+# SINGLE quotes. setup-alpine SOURCES this file, and a crypt hash begins
+# "$6$rounds=..." -- in double quotes the shell expands $6 as a positional
+# parameter, leaving "$rounds=..." on the card and an account nobody can log
+# into. There is no error when that happens, which is what makes it worth a
+# comment this long.
+COPAL_ROOT_PW_HASH='${CFG_ROOT_PW_HASH}'
+# 1 = take every default that answers.txt can supply without stopping to ask.
+COPAL_AUTO='${CFG_AUTO_ANSWERS}'
+COPAL_USER='${CFG_USER}'
 ANSWERS
 
 # THE BOOT CONFIGURATION, which is the one part of this script that is genuinely
@@ -2090,7 +2140,12 @@ SYSP2="/sys/block/$DISKDEV/$(basename "$P2")"
 # is 1 they feed the panes (see tui_say/tui_note/tui_warn), and otherwise they
 # are the plain printf they have always been. $TUI is 0 everywhere except inside
 # auto_run, so the interactive menu is unaffected.
-say()  { if [ "${TUI:-0}" = 1 ]; then tui_say  "$*"
+# PKG_GROUP: whatever say() last announced. try_add labels its packages with
+# it, so the timing report groups by the section a package was installed in
+# without a single call site having to name itself.
+PKG_GROUP="packages"
+say()  { PKG_GROUP="$*"
+         if [ "${TUI:-0}" = 1 ]; then tui_say  "$*"
          else printf '\n\033[36m==> %s\033[0m\n' "$*"; fi; }
 note() { if [ "${TUI:-0}" = 1 ]; then tui_note "$*"
          else printf '    %s\n' "$*"; fi; }
@@ -2661,16 +2716,82 @@ INSTALL_TIMES=/var/lib/copal/install-times.tsv
 # corrected -- it is the real cost of putting that package first, and it is
 # exactly the thing worth reordering. The report says so rather than pretending
 # each figure is intrinsic.
-record_install_time() {  # <package> <seconds> <ok|failed|cached>
+record_install_time() {  # <package> <seconds> <ok|failed|cached> [group]
     mkdir -p "$(dirname "$INSTALL_TIMES")" 2>/dev/null || return 0
     _sz=$(apk info -s "${1%@*}" 2>/dev/null | awk '/[0-9]/ { print $1; exit }')
-    printf '%s\t%s\t%s\t%s\t%s\n' \
-        "$(date +%s)" "$2" "$3" "$1" "${_sz:-?}" >> "$INSTALL_TIMES" 2>/dev/null || true
+    # Sixth column, appended rather than inserted, so a records file written
+    # by an earlier build still reads correctly -- awk sees an empty $6 and
+    # calls the group "(unrecorded)" rather than mis-parsing the line.
+    # Tabs are stripped from the group for the same reason.
+    _grp=$(printf '%s' "${4:-$PKG_GROUP}" | tr -d '\t' | cut -c1-40)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(date +%s)" "$2" "$3" "$1" "${_sz:-?}" "$_grp" >> "$INSTALL_TIMES" 2>/dev/null || true
+}
+
+# ------------------------------------------------- the per-package readout ---
+# One line per package, printed as it finishes, 60 columns wide:
+#
+#     [ 3/12] gcc ....................... 6m 52s
+#
+# COLUMNS, not tabs. A tab stop is 8 characters and a package name can be 2
+# ("bc") or 24 ("font-noto-cjk-extra"), so tabs put the timing in a different
+# place on almost every line -- the one thing a column of numbers must not do.
+# The dot leader does the job tabs were wanted for: it makes the eye's path
+# from a short name to its number as easy as from a long one.
+#
+# The count is per GROUP, not per install: "3 of 12" answers "how much of this
+# section is left", which is the question being asked at the time. The overall
+# total is unknowable here -- stages decide what to install as they go.
+pkg_line() {  # <index> <total> <package> <status> <seconds>
+    [ "${TUI:-0}" = 1 ] && { note "$3 ($5s)"; return 0; }
+    _n=$3 _st=$4 _sec=$5
+    # h/m/s, and never wider than 7 columns.
+    if   [ "$_sec" -ge 3600 ]; then _t=$(printf '%dh%02dm' $((_sec/3600)) $((_sec%3600/60)))
+    elif [ "$_sec" -ge 60 ];   then _t=$(printf '%dm %02ds' $((_sec/60)) $((_sec%60)))
+    else                            _t=$(printf '%ds' "$_sec")
+    fi
+    case "$_st" in
+        cached) _c='\033[2m';  _t='cached' ;;   # dim: nothing happened
+        failed) _c='\033[31m'; _t='failed' ;;
+        *) if   [ "$_sec" -ge 60 ]; then _c='\033[31m'   # a minute-plus is the
+           elif [ "$_sec" -ge 10 ]; then _c='\033[33m'   # thing worth moving
+           else                          _c='\033[32m'
+           fi ;;
+    esac
+    # 4 indent + 8 counter + 1 + 40 name/leader + 7 time = 60.
+    _lead=$(printf '%*s' $(( 40 - ${#_n} )) '' | tr ' ' '.')
+    [ "${#_n}" -ge 40 ] && { _n=$(printf '%.37s' "$_n")...; _lead=''; }
+    printf '    \033[2m[%2d/%2d]\033[0m %s\033[2m%s\033[0m %b%7s\033[0m\n' \
+        "$1" "$2" "$_n" "$_lead" "$_c" "$_t"
+}
+
+# Closes a group with its share of the wall clock, so the breakdown is legible
+# while it happens and not only in copal-times afterwards.
+pkg_group_total() {  # <count> <seconds>
+    [ "${TUI:-0}" = 1 ] && return 0
+    [ "$1" -gt 0 ] || return 0
+    # The summary text first, then a rule sized to whatever is left of the 60
+    # columns. A fixed-width rule made this line 74 wide the moment the totals
+    # grew an hours field, which defeats the point of choosing a width at all.
+    _sum=$(printf '%d package%s in %dm %02ds' \
+        "$1" "$( [ "$1" = 1 ] || echo s )" $(( $2 / 60 )) $(( $2 % 60 )))
+    _rule=$(( 55 - ${#_sum} ))
+    [ "$_rule" -lt 4 ] && _rule=4
+    printf '    \033[2m%s\033[0m \033[1m%s\033[0m\n' \
+        "$(printf '%*s' "$_rule" '' | tr ' ' '-')" "$_sum"
 }
 
 try_add() {
     _ok=0
+    # x of m, where m is this call's package list. Counted before the loop so
+    # a package skipped for an unreachable @testing repository still advances
+    # the numerator -- "4 of 12" must always mean four have been dealt with.
+    _tot=$#
+    _idx=0
+    _grp_t0=$(date +%s)
+    _grp_n=0
     for _p in "$@"; do
+        _idx=$((_idx + 1))
         # 'name@testing' is apk's syntax for one package out of a tagged
         # repository. Registering that repository is this function's job
         # rather than each caller's: doing it here is what makes '@testing'
@@ -2688,7 +2809,7 @@ try_add() {
         _bare=${_p%@*}
         _t0=$(date +%s)
         if apk info -e "$_bare" >/dev/null 2>&1; then
-            note "$_bare (already installed)"; _ok=1
+            pkg_line "$_idx" "$_tot" "$_bare" cached 0; _ok=1
             record_install_time "$_bare" 0 cached
         # apk's own complaint, kept rather than thrown away. This used to
         # report every failure as "not in the configured repositories", which
@@ -2700,13 +2821,16 @@ try_add() {
         # log afterwards or not at all, so the log has to say what happened.
         elif _why=$(apk add "$_p" 2>&1 >/dev/null); then
             _el=$(( $(date +%s) - _t0 ))
-            # Only the slow ones are worth remarking on inline; the rest are in
-            # the report. Thirty seconds is where a human starts wondering
-            # whether it has hung.
-            [ "$_el" -ge 30 ] && note "$_p  (${_el}s)" || note "$_p"
+            # Every package reports its own time now, not only the slow ones.
+            # The colour carries what the old 30-second threshold carried --
+            # red is "this is where the time went" -- without hiding the rest,
+            # and a column of times is what makes one line stand out at all.
+            pkg_line "$_idx" "$_tot" "$_p" ok "$_el"
+            _grp_n=$((_grp_n + 1))
             _ok=1
             record_install_time "$_p" "$_el" ok
         else
+            pkg_line "$_idx" "$_tot" "$_p" failed 0
             record_install_time "$_p" "$(( $(date +%s) - _t0 ))" failed
             # apk spreads one error over three lines; make it one.
             _why=$(printf '%s' "$_why" | tr '\n\t' '  ' | sed 's/  */ /g; s/^ //; s/ $//')
@@ -2728,6 +2852,9 @@ try_add() {
             esac
         fi
     done
+    # Only when there was more than one thing to do: a rule and a total under a
+    # single package is noise, not a summary.
+    [ "$_tot" -gt 1 ] && pkg_group_total "$_grp_n" $(( $(date +%s) - _grp_t0 ))
     [ "$_ok" = 1 ]
 }
 # The '|| true' is the entire difference between the two names, and it was
@@ -3327,7 +3454,19 @@ enable_testing_tag() {
 # copal-menu reads the table from disk rather than carrying its own copy, so
 # stage 12 and the menu can never disagree about what exists.
 write_catalogue() {
-    mkdir -p /usr/local/share
+    # The catalogue's own directory, not its parent. This said
+    # `mkdir -p /usr/local/share` and worked only by luck: /usr/local/share
+    # already exists on any Alpine with a package installed under it, while
+    # .../share/copal was created as a side effect by stage 7's
+    # `mkdir -p /usr/local/share/copal/guides`. So whichever stage happened to
+    # run first decided whether the other one worked, and the failure --
+    #
+    #     can't create /usr/local/share/copal/catalogue: nonexistent directory
+    #
+    # -- appeared on aarch64 and not on x86_64 purely because the stages
+    # interleave differently there. Derived from $CATFILE so the two cannot
+    # drift apart again.
+    mkdir -p "${CATFILE%/*}"
     catalogue_available > "$CATFILE"
 }
 
@@ -3992,6 +4131,18 @@ git_identity_load() {
 git_identity_ask() {
     git_identity_load || true
     say "Git identity for '$PI_USER'"
+
+    # COPAL_AUTO means the answers on the card are the answers, and asking
+    # again is asking a question nobody is there to hear. Only when there is
+    # actually something to accept: an auto install with no identity on the
+    # card still asks, because silently leaving git unconfigured for an hour
+    # and a half is worse than one prompt.
+    if answers_auto && [ -n "$GIT_NAME$GIT_EMAIL" ]; then
+        note "auto: ${GIT_NAME:-(no name)} <${GIT_EMAIL:-no email}> -- from answers.txt"
+        git_id_save "$GIT_NAME" "$GIT_EMAIL" \
+            && note "saved to $IDFILE -- stage 7 applies it without asking again"
+        return 0
+    fi
     cat <<'MSG'
     Git stamps every commit with a name and an email address. They are not
     verified by anything and they are not credentials -- they are the
@@ -4035,6 +4186,61 @@ MSG
     return 0
 }
 
+# ------------------------------------------- the password from answers.txt ---
+# setup-alpine has no answer-file variable for the root password, and that one
+# gap is what has kept a full-automatic install from being possible: everything
+# else on the card is answered, and then an hour of unattended work stops on a
+# prompt nobody is watching.
+#
+# `make answers` closes it by putting a SHA-512 crypt hash on the card. Reading
+# it back is a grep rather than a `.` of the whole file: answers.txt is
+# setup-alpine's, sourcing it here would set thirty of its variables in this
+# shell as a side effect, and only one line is wanted.
+answers_pw_hash() {
+    [ -f "$ANSWERS" ] || return 1
+    # Quote-agnostic: the card is written with single quotes, but a file
+    # hand-edited on the Mac may carry double ones, and neither should decide
+    # whether the password works.
+    _h=$(sed -n "s/^COPAL_ROOT_PW_HASH=['\"]\{0,1\}//p" "$ANSWERS" \
+            | sed "s/['\"]\{0,1\}[[:space:]]*\$//" | head -1)
+    # A crypt hash starts with $id$. Anything else -- an empty value, or a
+    # plaintext password someone hand-edited in -- is refused rather than
+    # applied, because chpasswd -e would take plaintext as a "hash" and lock
+    # the account with no error at all.
+    case "$_h" in
+        '$'*'$'*) printf '%s\n' "$_h"; return 0 ;;
+        '') return 1 ;;
+        # To stderr, deliberately. This function is called as $(...), which
+        # captures stdout -- where note and warn normally print -- so a
+        # warning written the usual way would be swallowed into the variable
+        # instead of reaching the console, and a hand-edited plaintext
+        # password would be ignored in total silence.
+        *) warn "COPAL_ROOT_PW_HASH in answers.txt is not a crypt hash -- ignoring it" >&2
+           note "Re-run 'make answers' on the Mac; do not edit that line by hand." >&2
+           return 1 ;;
+    esac
+}
+
+answers_auto() {
+    [ -f "$ANSWERS" ] || return 1
+    _a=$(sed -n "s/^COPAL_AUTO=['\"]\{0,1\}//p" "$ANSWERS" \
+            | sed "s/['\"]\{0,1\}[[:space:]]*\$//" | head -1)
+    [ "$_a" = 1 ]
+}
+
+# Applies the hash to root. Called after setup-alpine, because setup-alpine
+# sets a password of its own and would overwrite anything set before it.
+apply_answers_password() {
+    _hash="$1"
+    if printf 'root:%s\n' "$_hash" | chpasswd -e 2>/dev/null; then
+        note "root password set from answers.txt"
+        return 0
+    fi
+    warn "could not apply the password hash from answers.txt"
+    note "root keeps whatever setup-alpine was given. Fix it with: passwd root"
+    return 1
+}
+
 # ---------------------------------------------------- stage 1: base config ---
 stage_base_config() {
     say "Stage 1: applying setup-alpine answers"
@@ -4051,12 +4257,18 @@ stage_base_config() {
     note "commits. They are saved on the card and applied by stage 7, which is"
     note "why that stage does not stop to ask an hour and a half from now."
     note "Then keymap, hostname, network, timezone, mirror, sshd and user come"
-    note "from answers.txt. The root password is the one thing it will ask for --"
-    note "setup-alpine has no answer-file variable for it."
-    note "It will also ask for a password for '$PI_USER'. Whatever you type"
-    note "there is overwritten immediately afterwards with root's, so that"
-    note "the two accounts share one password. It will not accept an empty"
-    note "one, so type the root password again there and it changes nothing."
+    note "from answers.txt."
+    if answers_pw_hash >/dev/null 2>&1; then
+        note "The root password comes from answers.txt too, as a hash, so this"
+        note "stage asks nothing at all. '$PI_USER' gets the same password."
+    else
+        note "The root password is the one thing it will ask for --"
+        note "setup-alpine has no answer-file variable for it."
+        note "It will also ask for a password for '$PI_USER'. Whatever you type"
+        note "there is overwritten immediately afterwards with root's, so that"
+        note "the two accounts share one password. It will not accept an empty"
+        note "one, so type the root password again there and it changes nothing."
+    fi
 
     # Every question a human has to answer, in one place. The git identity goes
     # first because it is Copal's own prompt and can have the plain terminal to
@@ -4070,13 +4282,39 @@ stage_base_config() {
     # so the progress screen comes down for the duration and goes back up after.
     # Suspending is not optional: leaving it up would interleave its output with
     # addressed repaints and leave both unreadable.
-    tui_prompt "ROOT PASSWORD" \
-        "setup-alpine is about to ask for it. There is no answer-file variable for a password, so this is the one thing a full-automatic install cannot fill in." \
-        "You will be asked TWICE more -- once to confirm, then again for '$PI_USER'. Type the same thing all three times." \
-        ''
-    tui_suspend
-    setup-alpine -f "$ANSWERS"
-    tui_resume
+    # THE ONE PROMPT, and whether it happens at all.
+    #
+    # With a hash on the card, setup-alpine still insists on being given a
+    # password -- there is no flag that skips it -- so it is handed a throwaway
+    # one on stdin and the real hash replaces it a moment later. The throwaway
+    # is random and never leaves this shell: it exists only to satisfy three
+    # prompts, and root's hash is overwritten before the stage ends.
+    #
+    # Piping to setup-alpine works because busybox passwd reads from stdin when
+    # stdin is not a terminal. That is also why the throwaway is repeated four
+    # times: root twice, then '$PI_USER' twice, and a short read there would
+    # leave setup-alpine consuming the next stage's input.
+    if _pw_hash=$(answers_pw_hash); then
+        note "Root password comes from answers.txt -- nothing to type."
+        _throwaway=$(dd if=/dev/urandom bs=1 count=18 2>/dev/null | base64 | tr -d '=+/' )
+        tui_suspend
+        printf '%s\n%s\n%s\n%s\n' \
+            "$_throwaway" "$_throwaway" "$_throwaway" "$_throwaway" \
+            | setup-alpine -f "$ANSWERS"
+        tui_resume
+        _throwaway=""
+        apply_answers_password "$_pw_hash" || true
+        _pw_hash=""
+    else
+        tui_prompt "ROOT PASSWORD" \
+            "setup-alpine is about to ask for it. There is no answer-file variable for a password, so this is the one thing a full-automatic install cannot fill in." \
+            "You will be asked TWICE more -- once to confirm, then again for '$PI_USER'. Type the same thing all three times." \
+            "Run 'make answers' on the Mac to stop being asked at all." \
+            ''
+        tui_suspend
+        setup-alpine -f "$ANSWERS"
+        tui_resume
+    fi
 
     dedupe_repositories
 
