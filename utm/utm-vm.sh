@@ -38,6 +38,7 @@
 #   utm/utm-vm.sh log     --target x86_64        # follow the install transcript
 #   utm/utm-vm.sh layout                         # arrange the VM windows on screen
 #   utm/utm-vm.sh layout --autotype              # ...and log in and start the install
+#   utm/utm-vm.sh layout --no-start              # arrange only; do not start VMs
 #
 set -euo pipefail
 
@@ -79,11 +80,14 @@ NO_SHARE=0
 # accident.
 AUTOTYPE=0
 INIT_PATH="/media/vda1/copal-init.sh"
+# layout starts the machines before arranging them. --no-start skips that, for
+# rearranging windows that are already up.
+NO_START=0
 # layout only: WxH in POINTS, not pixels -- a Retina display reports twice
 # the number AppleScript works in. Empty means ask the window server.
 SCREEN=""
 
-usage() { sed -n '5,40p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '5,41p' "$0" | sed 's/^# \{0,1\}//'; }
 
 [ $# -gt 0 ] || { usage; exit 0; }
 ACTION="$1"; shift
@@ -196,10 +200,13 @@ on driveConsole(winName, initPath)
 		-- Ctrl-Option to get it back, which is why nothing below goes near
 		-- the graphical windows.
 		--
-		-- A third of the way down, not the middle: far enough from the title
-		-- bar to be inside the view, and clear of anything at the bottom edge.
+		-- 100 points below the TOP of the window, not a fraction of its
+		-- height. The title bar is about 28 points and UTM puts a toolbar
+		-- under it; 100 clears both and lands in the text view itself,
+		-- whatever size the window is. A fraction of the height moves with
+		-- the window and can land on a control.
 		set cx to (item 1 of wpos) + ((item 1 of wsize) div 2)
-		set cy to (item 2 of wpos) + ((item 2 of wsize) div 3)
+		set cy to (item 2 of wpos) + 100
 		click at {cx, cy}
 		delay 1
 
@@ -266,8 +273,43 @@ APPLESCRIPT
 # to Script Editor for YOU to read and run. That is not only a workaround: a
 # script that is about to be granted control of your desktop is a script worth
 # reading first, and the file it opens says at the top exactly what it touches.
+# The two machines this repository makes, by exact name -- the same list the
+# Makefile's purge target uses. Nothing else in UTM is touched.
+LAYOUT_VMS="Copal-aarch64 Copal-x86_64"
+
+# Start whatever is not already running, and wait for the windows to exist.
+#
+# WHY THIS IS PART OF layout: arranging windows that are not there does
+# nothing, and the previous version left you to start the machines by hand
+# first and then remember to run this second. A stopped machine has no window
+# to place, so starting them IS part of placing them.
+layout_start_vms() {
+    [ -x "$UTMCTL" ] || { warn "utmctl not found -- not starting anything"; return 0; }
+    _started=0
+    for _n in $LAYOUT_VMS; do
+        case "$("$UTMCTL" status "$_n" 2>/dev/null)" in
+            started) note "$_n is already running" ;;
+            '') warn "$_n does not exist in UTM -- skipping"
+                note "Make it with: utm/utm-vm.sh create --target ${_n#Copal-}" ;;
+            *)  info "Starting $_n"
+                "$UTMCTL" start "$_n" >/dev/null 2>&1 \
+                    && _started=1 \
+                    || warn "could not start $_n" ;;
+        esac
+    done
+    # Only wait if something was actually started. UTM opens the window a
+    # moment after utmctl returns, and placing a window that does not exist
+    # yet silently does nothing -- which looks exactly like a broken script.
+    if [ "$_started" = 1 ]; then
+        info "Waiting for the consoles to appear"
+        sleep 6
+    fi
+}
+
 do_layout() {
     command -v osascript >/dev/null 2>&1 || die "osascript not found -- this action is macOS only"
+
+    [ "$NO_START" -eq 1 ] || layout_start_vms
 
     # Points, not pixels. Finder answers this without needing a grant of its
     # own, which is why the size is not asked of System Events along with
@@ -347,6 +389,7 @@ while [ $# -gt 0 ]; do
         --net)      NET_MODE="${2:-}"; shift 2 ;;
         --screen)   SCREEN="${2:-}"; shift 2 ;;
         --autotype) AUTOTYPE=1; shift ;;
+        --no-start) NO_START=1; shift ;;
         --init-path) INIT_PATH="${2:-}"; shift 2 ;;
         --force)    FORCE=1; shift ;;
         --no-share) NO_SHARE=1; shift ;;
