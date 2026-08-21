@@ -2320,8 +2320,13 @@ ensure_user_dirs() {  # [root prefix]
     # .ssh is 0700 because sshd refuses to read a key out of anything looser.
     # The rest are 0755: a home that other accounts cannot traverse breaks
     # nothing here and surprises people later.
+    # Templates is in the list because pcmanfm looks for it by name and says
+    # so on every start -- "The directory '~/Templates' doesn't exist,
+    # ignoring it". It is the only one of the XDG set that was missing, and a
+    # warning on every file-manager launch is the kind of small permanent
+    # noise that teaches people to ignore warnings.
     for _d in .config .cache .local .local/share .local/bin \
-              Desktop Documents Downloads Pictures Music Videos; do
+              Desktop Documents Downloads Pictures Music Videos Templates; do
         [ -d "$_pfx$_uh/$_d" ] || mkdir -p "$_pfx$_uh/$_d" 2>/dev/null || continue
         chmod 0755 "$_pfx$_uh/$_d" 2>/dev/null || true
     done
@@ -4683,7 +4688,7 @@ bindsym $mod+c      exec copal-center
 bindsym $mod+comma  exec copal-config
 # The key list, in a floating window. Shown once at login and on Super+/,
 # because a tiling WM with no menus is unusable until you know the bindings.
-set $helpcmd $term -title i3-keys -e less ~/.config/i3/keys.txt
+set $helpcmd TERMEMU_PLACEHOLDER -title i3-keys -e less ~/.config/i3/keys.txt
 bindsym $mod+slash exec $helpcmd
 bindsym $mod+F1    exec $helpcmd
 # The other guides -- the small web, and whatever else lands in
@@ -4881,6 +4886,21 @@ bar {
 }
 I3B
     } > /tmp/i3cfg.$$
+    # $helpcmd holds a command line, and it is built here rather than left as
+    # "$term -title ..." for i3 to expand.
+    #
+    # i3 substitutes a variable used inside ANOTHER variable's definition, and
+    # this used to rely on that. It also produced, at login and only at login:
+    #
+    #     /bin/sh: -title: not found
+    #
+    # which is what you get when $term expands to nothing and the first word
+    # of the command becomes the option after it. The config was correct --
+    # `set $term urxvt` on line 5, `set $helpcmd $term ...` on line 28, in
+    # that order, urxvt installed, and the same command run by hand works.
+    # Rather than depend on the ordering rules of somebody else's parser for
+    # something we already know the value of, put the value in.
+    sed -i "s|TERMEMU_PLACEHOLDER|$TERMEMU|" /tmp/i3cfg.$$
     install_home_file .config/i3/config /tmp/i3cfg.$$; rm -f /tmp/i3cfg.$$
 
     # The cheat sheet. i3 has no menus, no icons and no discoverable UI at
