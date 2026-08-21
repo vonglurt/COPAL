@@ -179,8 +179,17 @@ IMAGE_PATH=""
 IMAGE_SIZE="${IMAGE_SIZE:-64g}"
 FRESH=0
 SRC_ARG=""
+# Debug logging, decided HERE rather than only on the machine. A card written
+# for someone else, or for a board with no keyboard attached yet, is a card
+# whose first boot is the interesting one -- and "log in and turn logging on"
+# is advice that arrives after the thing worth logging has happened. --debug
+# writes the flag onto the boot partition so stage 1 picks it up, and it can
+# still be switched off afterwards like any other: doas copal-debug off.
+DEBUG_LOGGING=0
 while [ $# -gt 0 ]; do
     case "$1" in
+        --debug)   DEBUG_LOGGING=1; shift ;;
+        --debug=*) DEBUG_LOGGING="${1#--debug=}"; shift ;;
         --refresh) REFRESH=1; shift ;;
         --fresh)   FRESH=1; shift ;;
         --cache-only) CACHE_ONLY=1; shift ;;
@@ -1802,6 +1811,23 @@ PI_USER="${CFG_USER}"
 PI_GIT_NAME="${CFG_GIT_NAME}"
 PI_GIT_EMAIL="${CFG_GIT_EMAIL}"
 CONF
+
+# The debug marker, on the FAT partition where stage 1 will find it. A file
+# rather than a line in copal.conf, so that deleting it is the whole of
+# turning it off -- from the Mac, with the card in a reader, on a machine that
+# will not boot far enough to run anything.
+if [ "$DEBUG_LOGGING" != 0 ]; then
+    printf '%s\n' "$DEBUG_LOGGING" > "$MNT/copal-debug"
+    if [ "$DEBUG_LOGGING" = 1 ]; then
+        info "Debug logging: ON from first boot (no deadline)"
+    else
+        info "Debug logging: ON from first boot, for $DEBUG_LOGGING"
+    fi
+    info "  turn it off later with: doas copal-debug off"
+else
+    info "Debug logging: off (the default). Enable with --debug, or on the"
+    info "  machine with: doas copal-debug on 1d"
+fi
 
 if [ -n "${CFG_GIT_NAME}${CFG_GIT_EMAIL}" ]; then
     info "Git identity offered: ${CFG_GIT_NAME:-(no name)} <${CFG_GIT_EMAIL:-no email}> -- stage 1 asks, Enter accepts"
@@ -3987,6 +4013,7 @@ stage_base_config() {
     # apkovl. On a diskless system a change made after it is a change lost.
     configure_9p_share
     configure_power_button
+    configure_debug_flag
 
     # Before the commit, and before anything relies on persistence.
     lbu_fix_media
@@ -4231,6 +4258,37 @@ ACPIHANDLER
     power outright -- that is the hypervisor pulling the plug and nothing in
     here can soften it.
 PWRMSG
+}
+
+# The debug marker the Mac may have left on the boot partition. Copied onto the
+# root filesystem, where copal-debug looks for it, and then honoured for as long
+# as it says -- "1d" on the card means a day from FIRST BOOT, which is the only
+# reading that makes sense for a deadline set before the machine existed.
+#
+# The card's copy is left alone rather than deleted: pulling the card and
+# deleting one file is a way to turn this off that needs no login, and that is
+# worth keeping for exactly the machine this is aimed at -- the one that will
+# not boot far enough to run anything.
+configure_debug_flag() {
+    [ -f "$BOOT/copal-debug" ] || return 0
+    _want=$(head -n1 "$BOOT/copal-debug" 2>/dev/null | tr -d ' \t\r')
+    mkdir -p /etc/copal
+    case "$_want" in
+        ""|1|on|yes|true)
+            : > /etc/copal/debug
+            say "Debug logging is ON (asked for when the card was written)"
+            note "no deadline -- turn it off with: doas copal-debug off" ;;
+        *)
+            if command -v copal-debug >/dev/null 2>&1; then
+                copal-debug on "$_want" >/dev/null 2>&1 \
+                    && { say "Debug logging is ON for $_want (from the card)"; } \
+                    || { : > /etc/copal/debug; warn "could not read '$_want' as a duration -- debug is on with no deadline"; }
+            else
+                : > /etc/copal/debug
+                say "Debug logging is ON (deadline applied at next copal-debug run)"
+            fi ;;
+    esac
+    note "everything lands in /var/log/copal -- readable over ssh"
 }
 
 # ------------------------------------------- stage 2: ext4 p2 + apk cache ---
@@ -14131,7 +14189,28 @@ debug_on() {
         1|yes|on|true) return 0 ;;
         0|no|off|false) return 1 ;;
     esac
-    [ -f "$FLAG" ]
+    [ -f "$FLAG" ] || return 1
+    # An expiry inside the flag file, if there is one. Debugging that has to be
+    # remembered to be switched off is debugging that stays on for a year --
+    # so the usual way to turn it on is with a deadline, and the deadline is
+    # carried in the flag itself rather than only in a cron job. A cron that
+    # did not run, or a machine that was off when it should have, must not be
+    # able to leave the collection running for ever.
+    _exp=$(sed -n 's/^expires=//p' "$FLAG" 2>/dev/null | tail -n1)
+    [ -n "$_exp" ] || return 0
+    [ "$(date +%s)" -lt "$_exp" ]
+}
+
+# Turn a human duration into seconds. Plain digits are already seconds.
+duration_secs() {  # <1d|12h|30m|3600>
+    case "$1" in
+        *d) echo $(( ${1%d} * 86400 )) ;;
+        *h) echo $(( ${1%h} * 3600 )) ;;
+        *m) echo $(( ${1%m} * 60 )) ;;
+        *s) echo "${1%s}" ;;
+        *[!0-9]*) return 1 ;;
+        *) echo "$1" ;;
+    esac
 }
 
 usage() {
@@ -14140,17 +14219,26 @@ copal-debug -- the log collection, and the one folder to look in.
 
   copal-debug            is it on, and what has it gathered
   copal-debug on         start collecting into /var/log/copal
+  copal-debug on 1d      the same, but switch itself off after a day
+                         (1d, 12h, 30m, or a number of seconds)
   copal-debug off        stop, and leave what is already there
   copal-debug collect    refresh the snapshots now
+  copal-debug bundle     tar everything up, ready to copy off the machine
   copal-debug purge      delete the collection entirely
 
 Off by default. On a machine that is working, none of this is worth the
 writes. COPAL_DEBUG=1 in the environment turns it on for one command
 without changing the machine; COPAL_DEBUG=0 turns it off the same way.
 
+PREFER "on 1d" TO "on". Debugging that has to be remembered to be switched
+off is debugging that stays on for a year. The expiry is written into the
+flag file as well as scheduled, so a cron that never ran cannot leave it
+collecting for ever.
+
 Everything lands in one directory so it can be read over ssh:
     ssh user@thismachine 'ls -l /var/log/copal'
     ssh user@thismachine 'cat /var/log/copal/sysinfo.txt'
+    ssh user@thismachine 'doas copal-debug bundle'   # then scp it back
 USAGE
 }
 
@@ -14257,7 +14345,22 @@ README
 case "${1:-}" in
     ""|status)
         if debug_on; then echo "debug logging: ON"; else echo "debug logging: OFF"; fi
-        [ -f "$FLAG" ] && echo "  flag        : $FLAG" || echo "  flag        : not set"
+        if [ -f "$FLAG" ]; then
+            echo "  flag        : $FLAG"
+            _e=$(sed -n 's/^expires=//p' "$FLAG" 2>/dev/null | tail -n1)
+            if [ -n "$_e" ]; then
+                _left=$(( _e - $(date +%s) ))
+                if [ "$_left" -gt 0 ]; then
+                    echo "  expires     : in $(( _left / 3600 ))h $(( (_left % 3600) / 60 ))m"
+                else
+                    echo "  expires     : PASSED -- next cron tick switches it off"
+                fi
+            else
+                echo "  expires     : never (no deadline set)"
+            fi
+        else
+            echo "  flag        : not set"
+        fi
         [ -n "${COPAL_DEBUG:-}" ] && echo "  COPAL_DEBUG : ${COPAL_DEBUG} (overrides the flag)"
         if [ -d "$DIR" ]; then
             echo "  collection  : $DIR ($(du -sh "$DIR" 2>/dev/null | awk '{print $1}'))"
@@ -14267,14 +14370,90 @@ case "${1:-}" in
         fi ;;
     on)
         [ "$(id -u)" = 0 ] || { echo "needs root: doas copal-debug on" >&2; exit 1; }
-        mkdir -p /etc/copal; : > "$FLAG"
+        mkdir -p /etc/copal
+        if [ -n "${2:-}" ]; then
+            _secs=$(duration_secs "$2") || { echo "copal-debug: not a duration: $2" >&2; exit 2; }
+            _until=$(( $(date +%s) + _secs ))
+            printf 'expires=%s\n' "$_until" > "$FLAG"
+            # Belt and braces: the flag carries the deadline so it is honoured
+            # even if this never runs, and the cron job is what actually stops
+            # the collecting and tidies up.
+            if [ -d /etc/periodic/15min ]; then
+                cat > /etc/periodic/15min/copal-debug-expire <<'EXPIRE'
+#!/bin/sh
+# Written by copal-debug. Switches debug logging off once its deadline passes.
+exec /usr/local/bin/copal-debug expire
+EXPIRE
+                chmod 0755 /etc/periodic/15min/copal-debug-expire
+            fi
+            echo "debug logging ON until $(date -d "@$_until" 2>/dev/null || date -r "$_until" 2>/dev/null || echo "$_until")"
+        else
+            : > "$FLAG"
+            echo "debug logging ON -- with no deadline"
+            echo "  'doas copal-debug on 1d' would switch itself off after a day"
+        fi
         collect
-        echo "debug logging ON -- collecting into $DIR"
+        echo "Collecting into $DIR"
         echo "Read it with:  cat $DIR/sysinfo.txt"
         echo "Turn it off:   doas copal-debug off" ;;
+    expire)
+        # Run from cron. Silent unless it actually does something -- a job that
+        # prints on every tick trains people to ignore cron mail.
+        [ -f "$FLAG" ] || exit 0
+        _exp=$(sed -n 's/^expires=//p' "$FLAG" 2>/dev/null | tail -n1)
+        [ -n "$_exp" ] || exit 0
+        [ "$(date +%s)" -lt "$_exp" ] && exit 0
+        rm -f "$FLAG" /etc/periodic/15min/copal-debug-expire
+        logger -t copal-debug "debug logging expired and is now off"
+        echo "debug logging expired -- switched off. $DIR is left in place." ;;
+    bundle)
+        # One file to get off the machine. The whole point of a debug
+        # collection is that it ends up somewhere else, and "scp these
+        # seven paths, four of which are symlinks" is not that.
+        [ -d "$DIR" ] || { echo "nothing collected yet -- doas copal-debug on" >&2; exit 1; }
+        [ "$(id -u)" = 0 ] || { echo "needs root: doas copal-debug bundle" >&2; exit 1; }
+        collect
+        _out="/tmp/copal-debug-$(hostname)-$(date +%Y%m%d-%H%M%S).tar.gz"
+
+        # STAGED AND COPIED BY HAND rather than "tar -h". Dereferencing is the
+        # entire reason this exists -- a tar of links to files that are not in
+        # the tar is a tar of nothing -- and tar -h does not reliably do it:
+        # when a target cannot be read it quietly stores the LINK instead, so
+        # the bundle looks right and contains nothing. Caught by testing; the
+        # first version shipped four symlinks and no logs.
+        #
+        # A link whose target is missing is recorded AS missing, because that
+        # is a finding: no /var/log/Xorg.0.log means X never started, and a
+        # bundle that simply omitted it would hide the answer.
+        _stage=$(mktemp -d /tmp/copal-bundle.XXXXXX) || { echo "no /tmp" >&2; exit 1; }
+        mkdir -p "$_stage/copal"
+        for _f in "$DIR"/*; do
+            [ -e "$_f" ] || [ -L "$_f" ] || continue
+            _n=$(basename "$_f")
+            if [ -L "$_f" ]; then
+                _t=$(readlink "$_f")
+                if [ -r "$_t" ]; then
+                    cp "$_t" "$_stage/copal/$_n" 2>/dev/null \
+                        || printf 'could not read %s\n' "$_t" > "$_stage/copal/$_n.unreadable"
+                else
+                    printf '%s -> %s\n(target does not exist -- this is itself a finding)\n' \
+                           "$_n" "$_t" > "$_stage/copal/$_n.missing"
+                fi
+            else
+                cp "$_f" "$_stage/copal/$_n" 2>/dev/null || true
+            fi
+        done
+        tar czf "$_out" -C "$_stage" copal 2>/dev/null || {
+            rm -rf "$_stage"; echo "could not create $_out" >&2; exit 1; }
+        rm -rf "$_stage"
+        chmod 0644 "$_out"
+        echo "$_out  ($(wc -c < "$_out" | tr -d ' ') bytes)"
+        echo
+        echo "Copy it off with, from the other machine:"
+        echo "    scp $(id -un 2>/dev/null || echo user)@$(hostname):$_out ." ;;
     off)
         [ "$(id -u)" = 0 ] || { echo "needs root: doas copal-debug off" >&2; exit 1; }
-        rm -f "$FLAG"
+        rm -f "$FLAG" /etc/periodic/15min/copal-debug-expire
         echo "debug logging OFF"
         [ -d "$DIR" ] && echo "$DIR is left as it is -- 'copal-debug purge' removes it" ;;
     collect)

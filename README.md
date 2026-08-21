@@ -1302,6 +1302,103 @@ anything, while the PS/2 one needs none. `utm-vm.sh` now sets
 where there is no i8042 to enable — the i8042 is an x86 device, so ARM guests
 depend on USB HID either way.
 
+## Logging and debug mode
+
+**Logging is off by default.** On a 512 MB board writing to an SD card, logging
+everything is spending write cycles and space on evidence for a problem most
+machines never have. What stays on unconditionally is exactly one thing — the
+last desktop session, a few kilobytes, written by `copal-startx`. That is not a
+log collection; it is the minimum that makes the *first* failure diagnosable
+instead of requiring you to break the machine a second time to look at it.
+
+Debug mode turns that into a real collection, gathered into **one directory** so
+it can be read over the network:
+
+```
+/var/log/copal/
+  sysinfo.txt    kernel, consoles, graphics, input devices, gettys, services
+  dmesg.log      the ring buffer at collection time
+  install.log -> the install transcript on the boot partition
+  xsession.log-> the newest desktop session
+  xorg.log    -> Xorg's own log, if it got far enough to write one
+  messages    -> the system log
+```
+
+The arrows are **symlinks to live files**, never copies — a copy is stale the
+moment it is made and doubles what the card holds. A *broken* link is
+information, not a fault: `xorg.log` pointing nowhere means X never started,
+which is usually the thing being investigated.
+
+### Three ways to turn it on
+
+**On the machine**, at any time — no reinstall, no stage re-run:
+
+```sh
+doas copal-debug on 1d      # and switch itself off after a day
+doas copal-debug on         # no deadline
+doas copal-debug off
+```
+
+Prefer the deadline. Debugging that has to be *remembered* to be switched off is
+debugging that stays on for a year. The expiry is written into the flag file as
+well as scheduled in cron, so a cron job that never ran cannot leave a machine
+collecting for ever.
+
+**From the host, when the card is written** — because a card written for
+someone else, or for a board with no keyboard attached yet, is a card whose
+*first* boot is the interesting one, and "log in and turn logging on" is advice
+that arrives too late:
+
+```sh
+./copal-prep.sh --debug          # on from first boot
+./copal-prep.sh --debug=1d       # on for a day from first boot
+```
+
+That writes `copal-debug` to the FAT boot partition. Stage 1 picks it up. The
+file is left on the card afterwards, deliberately: pulling the card and deleting
+one file turns logging off without logging in at all, which is worth having for
+the machine this is aimed at — the one that will not boot far enough to run
+anything.
+
+**For a single command**, changing nothing about the machine:
+
+```sh
+COPAL_DEBUG=1 copal-startx       # this run only
+COPAL_DEBUG=0 copal-startx       # force it off, whatever the flag says
+```
+
+### Getting the logs off
+
+```sh
+doas copal-debug bundle          # one tar.gz in /tmp, symlinks dereferenced
+```
+
+It prints the `scp` line to run from the other machine. Dereferencing matters:
+a tar of links to files that are not in the tar is a tar of nothing.
+
+### Reading it remotely
+
+```sh
+ssh user@machine 'cat /var/log/copal/sysinfo.txt'
+ssh user@machine 'tail -40 /var/log/copal/xsession.log'
+ssh user@machine 'copal-logs errors'
+```
+
+`/var/log/copal` is mode 0755 on purpose — the point is inspection over SSH, and
+a debug collection only root can read defeats itself.
+
+### Housekeeping
+
+```
+copal-logs            what exists, and what it costs
+copal-logs clean      old sessions and stale .bak files, named before removal
+copal-debug purge     delete the collection entirely
+```
+
+`clean` never touches the install transcript without `--all`, and rotates rather
+than deletes even then. An installer's record of what it did is not garbage; on
+a machine being rebuilt it is the only history there is.
+
 ## Status
 
 This is a migration in progress, and the table says where it actually stands
