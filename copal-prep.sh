@@ -2727,16 +2727,81 @@ INSTALL_TIMES=/var/lib/copal/install-times.tsv
 # corrected -- it is the real cost of putting that package first, and it is
 # exactly the thing worth reordering. The report says so rather than pretending
 # each figure is intrinsic.
-record_install_time() {  # <package> <seconds> <ok|failed|cached> [group]
+# THE RECORD FORMAT, version 2. Tab-separated, one line per package, with two
+# comment lines at the top naming the version and the columns:
+#
+#   #copal-times v2
+#   #run  end  secs  status  pkg  deps  size  idx  total  arch  group
+#
+# Self-describing on purpose. A file that says what it is can be read by
+# something written later, and a reader that finds a version it does not know
+# can say so instead of silently misparsing eleven columns as six.
+#
+# WHY EACH COLUMN IS THERE -- none of them is "might be useful one day":
+#
+#   run     one id per install, so a file holding three runs can be compared
+#           run against run instead of averaged into mush. Persisted, so it
+#           survives stage 3's reboot: an install is one run even though it
+#           spans two boots.
+#   end     when it finished, epoch seconds. With secs this gives both the
+#           duration and where in the install it fell.
+#   secs    the duration.
+#   status  ok, cached or failed.
+#   pkg     as asked for, @tag and all.
+#   deps    HOW MANY packages that one apk call actually installed. This is
+#           the column that answers "why", and the reason the format changed.
+#           apk resolves dependencies, so the first package to need one pays
+#           for it; deps=1 with a large time is a genuinely expensive package,
+#           while deps=14 is a package that wore somebody else's cost. Without
+#           this the report can only say what was slow, never whether moving
+#           it would help.
+#   size    installed size of the named package, from apk info -s.
+#   idx     its position within the group, and
+#   total   how many were in that group -- the "3 of 12" from the screen,
+#           kept as data so a report can say "the last four of stage 12 were
+#           60% of it".
+#   arch    so aarch64 and x86_64 records can share a file and still be told
+#           apart. Both get built here, and they are not comparable.
+#   group   the section it was installed in. LAST, because it is the only
+#           field containing spaces, so a short read can never shift a
+#           numeric column.
+INSTALL_TIMES_VERSION=2
+INSTALL_RUN_FILE=/var/lib/copal/run-id
+
+install_run_id() {
+    [ -n "${INSTALL_RUN_ID:-}" ] && { printf '%s\n' "$INSTALL_RUN_ID"; return 0; }
+    if [ -s "$INSTALL_RUN_FILE" ]; then
+        INSTALL_RUN_ID=$(cat "$INSTALL_RUN_FILE" 2>/dev/null)
+    else
+        INSTALL_RUN_ID="$(date +%Y%m%d-%H%M%S)"
+        printf '%s\n' "$INSTALL_RUN_ID" > "$INSTALL_RUN_FILE" 2>/dev/null || true
+    fi
+    printf '%s\n' "$INSTALL_RUN_ID"
+}
+
+install_arch() {
+    [ -n "${INSTALL_ARCH:-}" ] || INSTALL_ARCH=$(apk --print-arch 2>/dev/null || uname -m)
+    printf '%s\n' "$INSTALL_ARCH"
+}
+
+record_install_time() {  # <package> <seconds> <ok|failed|cached> [deps] [idx] [total] [group]
     mkdir -p "$(dirname "$INSTALL_TIMES")" 2>/dev/null || return 0
+    # The header, once, when the file is new. Written before the first row so
+    # a reader never meets data it cannot identify.
+    if [ ! -s "$INSTALL_TIMES" ]; then
+        {
+            printf '#copal-times v%s\n' "$INSTALL_TIMES_VERSION"
+            printf '#run\tend\tsecs\tstatus\tpkg\tdeps\tsize\tidx\ttotal\tarch\tgroup\n'
+        } >> "$INSTALL_TIMES" 2>/dev/null || true
+    fi
     _sz=$(apk info -s "${1%@*}" 2>/dev/null | awk '/[0-9]/ { print $1; exit }')
-    # Sixth column, appended rather than inserted, so a records file written
-    # by an earlier build still reads correctly -- awk sees an empty $6 and
-    # calls the group "(unrecorded)" rather than mis-parsing the line.
-    # Tabs are stripped from the group for the same reason.
-    _grp=$(printf '%s' "${4:-$PKG_GROUP}" | tr -d '\t' | cut -c1-40)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$(date +%s)" "$2" "$3" "$1" "${_sz:-?}" "$_grp" >> "$INSTALL_TIMES" 2>/dev/null || true
+    # Tabs stripped from the group: it is the last field, but a tab in it would
+    # still invent a twelfth column.
+    _grp=$(printf '%s' "${7:-$PKG_GROUP}" | tr -d '\t' | cut -c1-40)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$(install_run_id)" "$(date +%s)" "$2" "$3" "$1" \
+        "${4:-0}" "${_sz:-?}" "${5:-0}" "${6:-0}" "$(install_arch)" "$_grp" \
+        >> "$INSTALL_TIMES" 2>/dev/null || true
 }
 
 # ------------------------------------------------- the per-package readout ---
@@ -2753,9 +2818,9 @@ record_install_time() {  # <package> <seconds> <ok|failed|cached> [group]
 # The count is per GROUP, not per install: "3 of 12" answers "how much of this
 # section is left", which is the question being asked at the time. The overall
 # total is unknowable here -- stages decide what to install as they go.
-pkg_line() {  # <index> <total> <package> <status> <seconds>
+pkg_line() {  # <index> <total> <package> <status> <seconds> [deps]
     [ "${TUI:-0}" = 1 ] && { note "$3 ($5s)"; return 0; }
-    _n=$3 _st=$4 _sec=$5
+    _n=$3 _st=$4 _sec=$5 _dp=${6:-1}
     # h/m/s, and never wider than 7 columns.
     if   [ "$_sec" -ge 3600 ]; then _t=$(printf '%dh%02dm' $((_sec/3600)) $((_sec%3600/60)))
     elif [ "$_sec" -ge 60 ];   then _t=$(printf '%dm %02ds' $((_sec/60)) $((_sec%60)))
@@ -2769,11 +2834,18 @@ pkg_line() {  # <index> <total> <package> <status> <seconds>
            else                          _c='\033[32m'
            fi ;;
     esac
-    # 4 indent + 8 counter + 1 + 40 name/leader + 7 time = 60.
-    _lead=$(printf '%*s' $(( 40 - ${#_n} )) '' | tr ' ' '.')
-    [ "${#_n}" -ge 40 ] && { _n=$(printf '%.37s' "$_n")...; _lead=''; }
-    printf '    \033[2m[%2d/%2d]\033[0m %s\033[2m%s\033[0m %b%7s\033[0m\n' \
-        "$1" "$2" "$_n" "$_lead" "$_c" "$_t"
+    # "+13" when one apk call brought thirteen other packages with it. Shown
+    # because it is the number to act on: it says whether this line is
+    # expensive in itself or merely first in the queue. Absent when the
+    # package brought nothing but itself, which is most of them.
+    _dep=''
+    [ "${_dp:-1}" -gt 1 ] 2>/dev/null && _dep=" +$((_dp - 1))"
+    # 4 indent + 8 counter + 1 + 40 name/leader/deps + 7 time = 60.
+    _w=$(( 40 - ${#_dep} ))
+    _lead=$(printf '%*s' $(( _w - ${#_n} )) '' | tr ' ' '.')
+    [ "${#_n}" -ge "$_w" ] && { _n=$(printf "%.$(( _w - 3 ))s" "$_n")...; _lead=''; }
+    printf '    \033[2m[%2d/%2d]\033[0m %s\033[2m%s\033[0m\033[36m%s\033[0m %b%7s\033[0m\n' \
+        "$1" "$2" "$_n" "$_lead" "$_dep" "$_c" "$_t"
 }
 
 # Closes a group with its share of the wall clock, so the breakdown is legible
@@ -2821,7 +2893,7 @@ try_add() {
         _t0=$(date +%s)
         if apk info -e "$_bare" >/dev/null 2>&1; then
             pkg_line "$_idx" "$_tot" "$_bare" cached 0; _ok=1
-            record_install_time "$_bare" 0 cached
+            record_install_time "$_bare" 0 cached 0 "$_idx" "$_tot"
         # apk's own complaint, kept rather than thrown away. This used to
         # report every failure as "not in the configured repositories", which
         # is one cause out of many and was flatly wrong the day the network
@@ -2830,19 +2902,30 @@ try_add() {
         # the repositories, and the real error, whatever it was, was on the
         # other side of a 2>/dev/null. An unattended install is read from its
         # log afterwards or not at all, so the log has to say what happened.
-        elif _why=$(apk add "$_p" 2>&1 >/dev/null); then
+        # BOTH streams captured now, not just stderr. apk names each package
+        # it installs -- "(3/14) Installing binutils (2.41-r0)" -- and that
+        # count is the difference between "gcc is slow" and "gcc was first, so
+        # gcc paid for binutils and thirteen others". It was going to
+        # /dev/null. The failure path uses the same capture, so apk's own
+        # complaint is still what gets reported when one fails.
+        elif _why=$(apk add "$_p" 2>&1); then
+            _deps=$(printf '%s\n' "$_why" | grep -c 'Installing ' 2>/dev/null || echo 0)
+            # apk installed at least the package asked for. A zero here means
+            # its output was not in the expected shape, not that nothing
+            # happened, and one is the honest floor.
+            [ "${_deps:-0}" -lt 1 ] && _deps=1
             _el=$(( $(date +%s) - _t0 ))
             # Every package reports its own time now, not only the slow ones.
             # The colour carries what the old 30-second threshold carried --
             # red is "this is where the time went" -- without hiding the rest,
             # and a column of times is what makes one line stand out at all.
-            pkg_line "$_idx" "$_tot" "$_p" ok "$_el"
+            pkg_line "$_idx" "$_tot" "$_p" ok "$_el" "$_deps"
             _grp_n=$((_grp_n + 1))
             _ok=1
-            record_install_time "$_p" "$_el" ok
+            record_install_time "$_p" "$_el" ok "$_deps" "$_idx" "$_tot"
         else
             pkg_line "$_idx" "$_tot" "$_p" failed 0
-            record_install_time "$_p" "$(( $(date +%s) - _t0 ))" failed
+            record_install_time "$_p" "$(( $(date +%s) - _t0 ))" failed 0 "$_idx" "$_tot"
             # apk spreads one error over three lines; make it one.
             _why=$(printf '%s' "$_why" | tr '\n\t' '  ' | sed 's/  */ /g; s/^ //; s/ $//')
             # Order matters. A package apk cannot fetch an index for is
@@ -14990,9 +15073,17 @@ copal-times -- how long each package took to install.
 
   copal-times             the slowest packages, and what they cost
   copal-times all         every package, slowest first
+  copal-times groups      where the time went, by section
   copal-times total       one line: packages, failures, wall-clock
+  copal-times csv         the whole record as CSV, for analysis elsewhere
   copal-times --motd      regenerate the login summary (needs root)
   copal-times --reset     start the record again (needs root)
+
+THE PULLED COLUMN is the count of OTHER packages apk installed to satisfy
+that one. It is what tells the two cases apart: a long time with "-" is a
+package that is genuinely expensive, and a long time with "+13" is a package
+that merely happened to be asked for first. "?" means the record predates
+this column.
 
 WHAT THE NUMBERS MEAN. apk resolves dependencies, so the FIRST package to
 need a dependency pays for it. Ask for cmake after gcc and cmake looks cheap;
@@ -15005,11 +15096,32 @@ USAGE
 
 [ -s "$TIMES" ] || { echo "No install times recorded yet ($TIMES)." >&2; exit 1; }
 
-# Fields: epoch, seconds, result, package, installed-size
-tot()    { awk -F'\t' '{ s += $2 } END { printf "%d", s+0 }' "$TIMES"; }
-count()  { awk -F'\t' 'END { print NR }' "$TIMES"; }
-failed() { awk -F'\t' '$3 == "failed" { n++ } END { print n+0 }' "$TIMES"; }
-cached() { awk -F'\t' '$3 == "cached" { n++ } END { print n+0 }' "$TIMES"; }
+# THE FORMAT. Version 2 is eleven tab-separated columns behind two comment
+# lines naming the version and the columns:
+#
+#   run  end  secs  status  pkg  deps  size  idx  total  arch  group
+#
+# Version 1 was six -- epoch, secs, status, pkg, size, group -- and files in
+# that shape still exist on machines built before the change. Rather than
+# demand a --reset, every reader below normalises by field count: eleven or
+# more is v2, six is v1 with deps unknown. NORM is that normalisation, kept in
+# one place so eleven awk programs cannot disagree about which column is
+# which. It sets: secs st pkg deps sz idx tt ar gp.
+NORM='
+    /^#/ { next }
+    {
+        if (NF >= 11)     { secs=$3; st=$4; pkg=$5; deps=$6+0; sz=$7; idx=$8+0; tt=$9+0; ar=$10; gp=$11 }
+        else if (NF >= 6) { secs=$2; st=$3; pkg=$4; deps=0;    sz=$5; idx=0;    tt=0;    ar="?";  gp=$6 }
+        else              { next }
+        secs = secs + 0
+    }
+'
+
+tot()    { awk -F'\t' "$NORM"' { s += secs } END { printf "%d", s+0 }' "$TIMES"; }
+count()  { awk -F'\t' "$NORM"' { n++ } END { print n+0 }' "$TIMES"; }
+failed() { awk -F'\t' "$NORM"' st == "failed" { n++ } END { print n+0 }' "$TIMES"; }
+cached() { awk -F'\t' "$NORM"' st == "cached" { n++ } END { print n+0 }' "$TIMES"; }
+version() { sed -n 's/^#copal-times v\([0-9]*\).*/\1/p' "$TIMES" 2>/dev/null | head -1; }
 
 hms() {  # <seconds> -> 1h 23m 45s, skipping the leading zeroes
     _s=${1:-0}
@@ -15019,24 +15131,76 @@ hms() {  # <seconds> -> 1h 23m 45s, skipping the leading zeroes
     fi
 }
 
+# One tab-separated stream, normalised, slowest first: secs pkg deps sz gp.
+# Everything below reads this rather than the file, so v1 and v2 look the same
+# from here on.
+rows() {
+    awk -F'\t' "$NORM"'
+        st == "ok" && secs > 0 { printf "%d\t%s\t%d\t%s\t%s\n", secs, pkg, deps, sz, gp }
+    ' "$TIMES" | sort -t"$(printf '\t')" -k1 -rn
+}
+
 report() {  # <how many rows, or "all">
     _lim="${1:-15}"
     _total=$(tot)
     [ "$_total" -gt 0 ] || _total=1
-    printf '\n  %-24s %8s %7s  %s\n' PACKAGE TIME SHARE SIZE
+    printf '\n  %-26s %8s %6s %5s  %s\n' PACKAGE TIME SHARE PULLED SIZE
     printf '  %s\n' '----------------------------------------------------------------'
     # Slowest first. Cached and failed rows are dropped: neither cost anything
     # to install, and both would push real packages off a short list.
-    awk -F'\t' '$3 == "ok" && $2 > 0 { print }' "$TIMES" \
-        | sort -t"$(printf '\t')" -k2 -rn \
-        | { [ "$_lim" = all ] && cat || head -n "$_lim"; } \
-        | while IFS="$(printf '\t')" read -r _when _sec _res _pkg _size; do
-              printf '  %-24s %7ss %6s%%  %s\n' \
-                     "$_pkg" "$_sec" \
+    rows | { [ "$_lim" = all ] && cat || head -n "$_lim"; } \
+        | while IFS="$(printf '\t')" read -r _sec _pkg _deps _size _grp; do
+              # PULLED is the count of OTHER packages that apk installed to
+              # satisfy this one. A big time with a blank here is a package
+              # that is genuinely expensive; a big time with a big number is
+              # one that happened to be asked for first. Blank rather than
+              # "0" for v1 records, which did not know.
+              if [ "${_deps:-0}" -gt 1 ]; then _d="+$((_deps - 1))"
+              elif [ "${_deps:-0}" -eq 1 ]; then _d="-"
+              else _d="?"
+              fi
+              printf '  %-26s %7ss %5s%% %5s  %s\n' \
+                     "$(printf '%.26s' "$_pkg")" "$_sec" \
                      "$(awk -v a="$_sec" -v b="$_total" 'BEGIN { printf "%.1f", a*100/b }')" \
-                     "$_size"
+                     "$_d" "$_size"
           done
     printf '\n'
+}
+
+# Where the time went by section, which is the view that answers "is this
+# stage worth splitting up" rather than "which package was worst".
+groups() {
+    _total=$(tot); [ "$_total" -gt 0 ] || _total=1
+    printf '\n  %-34s %8s %6s %5s\n' GROUP TIME SHARE COUNT
+    printf '  %s\n' '----------------------------------------------------------------'
+    awk -F'\t' "$NORM"'
+        st == "ok" { s[gp] += secs; n[gp]++ }
+        END { for (g in s) printf "%d\t%d\t%s\n", s[g], n[g], g }
+    ' "$TIMES" | sort -t"$(printf '\t')" -k1 -rn \
+      | while IFS="$(printf '\t')" read -r _sec _n _grp; do
+            printf '  %-34s %7ss %5s%% %5s\n' \
+                "$(printf '%.34s' "${_grp:-(unrecorded)}")" "$_sec" \
+                "$(awk -v a="$_sec" -v b="$_total" 'BEGIN { printf "%.1f", a*100/b }')" "$_n"
+        done
+    printf '\n'
+}
+
+# For analysis somewhere else. CSV with a header, every column, no colour and
+# no truncation -- the point is to be read by a program, so nothing here is
+# formatted for a terminal. Commas in a group are quoted; nothing else in the
+# record can contain one.
+csv() {
+    printf 'run,end,secs,status,pkg,deps,size,idx,total,arch,group\n'
+    awk -F'\t' '
+        /^#/ { next }
+        {
+            if (NF >= 11) { r=$1; e=$2; secs=$3; st=$4; pkg=$5; deps=$6; sz=$7; idx=$8; tt=$9; ar=$10; gp=$11 }
+            else if (NF >= 6) { r=""; e=$1; secs=$2; st=$3; pkg=$4; deps=""; sz=$5; idx=""; tt=""; ar=""; gp=$6 }
+            else next
+            gsub(/"/, "\"\"", gp)
+            printf "%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,\"%s\"\n", r, e, secs, st, pkg, deps, sz, idx, tt, ar, gp
+        }
+    ' "$TIMES"
 }
 
 summary() {
@@ -15046,9 +15210,11 @@ summary() {
 
 case "${1:-}" in
     ''|top)   report 15; summary
-              printf '\n  copal-times all   every package     copal-times --motd   at login\n\n' ;;
+              printf '\n  copal-times groups   by section     copal-times csv   for analysis\n\n' ;;
     all)      report all; summary ;;
+    groups)   groups; summary ;;
     total)    summary ;;
+    csv)      csv ;;
     --motd)
         [ "$(id -u)" = 0 ] || { echo "needs root: doas copal-times --motd" >&2; exit 1; }
         # Short, because a MOTD nobody reads is worse than none. The five
@@ -15057,17 +15223,25 @@ case "${1:-}" in
         {
             printf '\n  Copal -- last install: %s\n' "$(hms "$(tot)")"
             printf '  Slowest packages:\n'
-            awk -F'\t' '$3 == "ok" && $2 > 0 { print }' "$TIMES" \
-                | sort -t"$(printf '\t')" -k2 -rn | head -5 \
-                | while IFS="$(printf '\t')" read -r _w _sec _r _pkg _sz; do
-                      printf '    %-22s %ss\n' "$_pkg" "$_sec"
+            rows | head -5 \
+                | while IFS="$(printf '\t')" read -r _sec _pkg _deps _sz _grp; do
+                      # The dependency count comes along: "gcc 412s +13" says
+                      # in one line why it is at the top of this list.
+                      if [ "${_deps:-0}" -gt 1 ]; then
+                          printf '    %-22s %ss  (+%s pulled in)\n' "$_pkg" "$_sec" "$((_deps - 1))"
+                      else
+                          printf '    %-22s %ss\n' "$_pkg" "$_sec"
+                      fi
                   done
             printf '  Full report: copal-times     Clear this: doas copal-times --reset\n\n'
         } > "$MOTD"
         echo "wrote $MOTD" ;;
     --reset)
         [ "$(id -u)" = 0 ] || { echo "needs root: doas copal-times --reset" >&2; exit 1; }
-        : > "$TIMES"; : > "$MOTD"; echo "install times cleared" ;;
+        # The run id goes too, so the next install is a new run rather than a
+        # continuation of the one just erased.
+        : > "$TIMES"; : > "$MOTD"; rm -f /var/lib/copal/run-id
+        echo "install times cleared" ;;
     -h|--help) usage ;;
     *) printf 'copal-times: unknown argument "%s"\n\n' "$1" >&2; usage >&2; exit 2 ;;
 esac
