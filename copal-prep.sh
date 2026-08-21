@@ -3320,6 +3320,27 @@ DOASCONF
         chmod 0640 /etc/doas.d/wheel.conf
     fi
 
+    # Turning the machine off is not an administrative act in the sense the
+    # password prompt is defending against -- anyone sitting at this keyboard
+    # can reach the power cable, and a prompt only guarantees the SD card is
+    # written to at a worse moment. Without this rule copal-halt asks for a
+    # password from a menu entry that has no terminal to type it into, which
+    # looks exactly like a Session menu that does nothing.
+    #
+    # Named zz- because doas takes the LAST matching rule, and wheel.conf's
+    # 'permit persist' would otherwise win on a plain alphabetical read of
+    # /etc/doas.d. Three commands by absolute path, and nothing else.
+    if [ -d /etc/doas.d ] || mkdir -p /etc/doas.d; then
+        cat > /etc/doas.d/zz-copal-halt.conf <<'HALTRULE'
+# Written by Copal: shutting down needs no password. See copal-halt.
+permit nopass :wheel cmd /sbin/poweroff
+permit nopass :wheel cmd /sbin/reboot
+permit nopass :wheel cmd /sbin/halt
+HALTRULE
+        chown root:root /etc/doas.d/zz-copal-halt.conf 2>/dev/null || true
+        chmod 0640 /etc/doas.d/zz-copal-halt.conf
+    fi
+
     _err=$(doas_config_error)
     if [ -n "$_err" ]; then
         warn "doas configuration is not valid -- $_err"
@@ -3418,6 +3439,149 @@ admin_set_shells() {
     note "ash is still there as /bin/sh -- scripts with #!/bin/sh are unaffected"
 }
 
+# Tab completion, and the rest of what makes bash worth having been switched to.
+#
+# admin_set_shells hands both accounts bash, and that alone gets you readline:
+# Tab completes file and command names, the arrows walk history. What it does
+# NOT get you is any of the completion people actually mean when they say tab
+# completion -- `apk add ne<Tab>`, `git checkout ma<Tab>`, `doas <Tab>` -- all
+# of which live in the bash-completion package and none of which loads unless
+# something sources it.
+#
+# The reason this is easy to miss on Alpine: bash reads ~/.bashrc for an
+# INTERACTIVE NON-LOGIN shell, and ~/.profile for a login shell -- and a
+# console login, an ssh session and a terminal opened from i3 are all login
+# shells here. So a ~/.bashrc on its own is read by almost nothing on this
+# machine. The `. ~/.bashrc` line appended to ~/.profile is what closes that
+# gap, and it is the whole trick.
+#
+# /etc/bash/bash_completion.sh is Alpine's path for it -- not /usr/share/, and
+# not /etc/bash_completion, both of which appear in every tutorial written for
+# a different distribution.
+admin_shell_dotfiles() {
+    say "Shell: tab completion, history and a prompt"
+    add_optional bash-completion
+
+    cat > /tmp/bashrc.$$ <<'BASHRC'
+# ~/.bashrc -- written by Copal. Interactive settings only.
+# Sourced from ~/.profile, because on this machine nearly every shell is a
+# login shell and would otherwise never read this file at all.
+
+# Nothing below applies to a script.
+case $- in *i*) ;; *) return ;; esac
+
+# Tab completion for arguments, not just filenames: package names for apk,
+# branches for git, hostnames for ssh, the completed command's own options.
+if [ -f /etc/bash/bash_completion.sh ]; then
+    . /etc/bash/bash_completion.sh
+elif [ -f /usr/share/bash-completion/bash_completion ]; then
+    . /usr/share/bash-completion/bash_completion
+fi
+
+# History that survives, and that two terminals do not overwrite for each
+# other -- append rather than truncate, and write after every command instead
+# of only at exit, which is the part that matters on a machine that may lose
+# power.
+HISTSIZE=5000
+HISTFILESIZE=10000
+HISTCONTROL=ignoreboth        # no duplicates, no lines starting with a space
+shopt -s histappend cmdhist
+PROMPT_COMMAND="history -a${PROMPT_COMMAND:+; $PROMPT_COMMAND}"
+
+shopt -s checkwinsize         # rewrap after the terminal is resized
+shopt -s cdspell dirspell 2>/dev/null || true   # forgive a typo in a directory
+
+# user@host:dir$ -- red when root, so the difference is visible without
+# reading it. Tokyo Night's palette, the same one i3 and the terminal use.
+if [ "$(id -u)" = 0 ]; then
+    PS1='\[\e[1;31m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]# '
+else
+    PS1='\[\e[1;32m\]\u@\h\[\e[0m\]:\[\e[1;34m\]\w\[\e[0m\]$ '
+fi
+
+alias ls='ls --color=auto'
+alias ll='ls -lh'
+alias la='ls -lha'
+alias grep='grep --color=auto'
+alias df='df -h'
+BASHRC
+    install_home_file .bashrc /tmp/bashrc.$$; rm -f /tmp/bashrc.$$
+
+    # readline's own settings, which are not bash's and are not set by any
+    # package. The two that change the day: one Tab shows the choices instead
+    # of demanding a second Tab, and completion stops caring about case.
+    cat > /tmp/inputrc.$$ <<'INPUTRC'
+# ~/.inputrc -- written by Copal. Read by bash, and by anything else using
+# readline (python3, sqlite3, gdb, ftp).
+set show-all-if-ambiguous on   # one Tab lists the choices; no second press
+set completion-ignore-case on  # Doc<Tab> finds documents/
+set colored-stats on           # directories, executables and links coloured
+set completion-query-items 200
+set bell-style none
+set mark-symlinked-directories on
+
+# Type a few letters, then Up: history walks only the lines that start that
+# way. This is the single biggest thing readline can do for you and it is off
+# by default in every distribution.
+"\e[A": history-search-backward
+"\e[B": history-search-forward
+INPUTRC
+    install_home_file .inputrc /tmp/inputrc.$$; rm -f /tmp/inputrc.$$
+
+    # Two things appended to ~/.profile rather than written into it, because
+    # it also carries the startx block, and guarded by a marker so that
+    # re-running this stage does not stack copies of them.
+    #
+    # ~/.local/bin ON PATH is the second one, and it is the fix for a whole
+    # class of "I installed it and the shell says not found". Everything that
+    # installs for one user rather than for the machine puts its binaries
+    # there and none of them puts it on PATH:
+    #
+    #   pip install --user yt-dlp        ~/.local/bin/yt-dlp
+    #   pipx install ...                 ~/.local/bin/
+    #   npm i -g with a user prefix      ~/.local/bin/
+    #   cargo, go install                ~/.cargo/bin, ~/go/bin
+    #
+    # It is the XDG-blessed location, ensure_user_home already creates it, and
+    # Alpine's /etc/profile does not include it -- Debian's does, which is why
+    # this is a surprise on Alpine and not elsewhere. ~/bin is the older
+    # convention and costs nothing to honour alongside it.
+    #
+    # It matters more here than on a normal desktop, because dmenu (Super+space)
+    # lists exactly what is on PATH. A program that is not on PATH is not merely
+    # awkward to type -- it is invisible to the launcher, and so, as far as the
+    # desktop is concerned, not installed.
+    ensure_user_home || true
+    for _h in /root "$(user_home)"; do
+        [ -n "$_h" ] && [ -d "$_h" ] || continue
+        if ! grep -qs 'written by Copal: shell setup' "$_h/.profile" 2>/dev/null; then
+            cat >> "$_h/.profile" <<'PROFILE'
+
+# --- written by Copal: shell setup -----------------------------------------
+# Per-user program directories, ahead of the system ones so a newer copy you
+# installed yourself wins over an older packaged one. Each is added only if it
+# is really there and not already on PATH, so this is safe to read twice.
+for _d in "$HOME/.local/bin" "$HOME/bin" "$HOME/.cargo/bin" "$HOME/go/bin"; do
+    [ -d "$_d" ] || continue
+    case ":$PATH:" in *":$_d:"*) ;; *) PATH="$_d:$PATH" ;; esac
+done
+unset _d
+export PATH
+
+# A console login, an ssh session and a terminal opened from i3 are all LOGIN
+# shells, and a login shell reads this file and not ~/.bashrc. Without this
+# line the completion and history settings there are read by nothing.
+[ -n "$BASH_VERSION" ] && [ -f "$HOME/.bashrc" ] && . "$HOME/.bashrc"
+# --- end Copal shell setup -------------------------------------------------
+PROFILE
+            _own=$(stat -c '%u:%g' "$_h" 2>/dev/null) \
+                && chown "$_own" "$_h/.profile" 2>/dev/null || true
+            note "$_h/.profile -- .local/bin on PATH, and .bashrc sourced"
+        fi
+    done
+    note "open a new terminal, or run 'exec bash -l', to pick this up"
+}
+
 admin_ensure_privileges() {
     id "$PI_USER" >/dev/null 2>&1 || { warn "user '$PI_USER' does not exist -- cannot grant it anything"; return 1; }
 
@@ -3437,6 +3601,7 @@ admin_ensure_privileges() {
     admin_grant_sudo
     admin_fix_desktop_groups
     admin_set_shells
+    admin_shell_dotfiles
     return 0
 }
 
@@ -4800,6 +4965,11 @@ exec --no-startup-id copal-splash
 exec --no-startup-id $helpcmd
 bindsym $mod+Shift+r restart
 bindsym $mod+Shift+e exec "i3-nagbar -t warning -m 'Exit i3?' -B 'Yes' 'i3-msg exit'"
+# The whole of ending the day: it asks, closes the session so applications are
+# asked to quit rather than killed, syncs, and powers down. Super+Shift+E above
+# only leaves i3, which is the step people mistake for a shutdown.
+bindsym $mod+Shift+p exec copal-halt
+bindsym $mod+Shift+Delete exec copal-halt reboot
 
 # focus / move, arrows and hjkl both
 bindsym $mod+h focus left
@@ -4929,6 +5099,7 @@ bindsym Ctrl+Mod1+h           focus left
 bindsym Ctrl+Mod1+w           layout tabbed
 bindsym Ctrl+Mod1+comma       exec copal-config
 bindsym Ctrl+Mod1+slash       exec $helpcmd
+bindsym Ctrl+Mod1+Shift+p     exec copal-halt
 bindsym Ctrl+Mod1+Shift+q     kill
 bindsym Ctrl+Mod1+Shift+space floating toggle
 bindsym Ctrl+Mod1+Shift+1 move container to workspace number 1
@@ -5053,6 +5224,155 @@ fi
 printf '\nPress Enter to close.\n'; read -r _
 COPALINSTALL
     chmod 0755 /usr/local/bin/copal-install
+
+    # ----------------------------------------------------------------------
+    # copal-halt.
+    #
+    # "Log out of i3, then find a console, then type poweroff" is three steps
+    # and two mental models for the one thing every session ends with. This is
+    # the one command, and it is the same command from the menu, from a key
+    # binding, and from a shell -- inside X or at the console.
+    #
+    # Two things have to be true for it to work as $PI_USER, and neither is
+    # automatic:
+    #
+    #   - poweroff has to actually reach init. busybox's poweroff signals PID
+    #     1 and only root may do that, so an unprivileged 'poweroff' fails
+    #     silently-ish in a menu entry -- which is exactly what a Session menu
+    #     that appears to do nothing looks like. admin_ensure_doas writes the
+    #     nopass rule that fixes it; see /etc/doas.d/zz-copal-halt.conf.
+    #
+    #   - the process that calls it has to outlive the session it is ending.
+    #     Launched from an i3 binding, this script is i3's child; telling i3 to
+    #     exit and then calling poweroff from the same process is a race with
+    #     its own death. setsid puts the tail of the job in its own session
+    #     first, so the power-off happens whatever becomes of X.
+    say "Installing /usr/local/bin/copal-halt"
+    cat > /usr/local/bin/copal-halt <<'COPALHALT'
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 paulr@sdf.org -- part of Copal Linux.
+# copal-halt -- end the session, and the machine, in one step.
+set -eu
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+ACTION=poweroff
+ASK=1
+
+usage() {
+    cat <<'USAGE'
+copal-halt -- end the session, and the machine, in one step.
+
+  copal-halt            turn the machine off (asks first)
+  copal-halt reboot     restart it
+  copal-halt logout     leave the desktop, keep the machine running
+  copal-halt -y ...     do not ask
+
+Run it from anywhere: a terminal in X, a console, or ssh. Inside i3 it
+closes the session first so windows are asked to quit, then powers down.
+Super + Shift + P is the same thing, and so is Session > Shut down in the
+menu (Super + Z).
+USAGE
+}
+
+for a in "$@"; do
+    case "$a" in
+        -y|--yes|-f)                    ASK=0 ;;
+        ""|off|poweroff|shutdown|halt)  ACTION=poweroff ;;
+        reboot|restart)                 ACTION=reboot ;;
+        logout|logoff|exit)             ACTION=logout ;;
+        -h|--help)                      usage; exit 0 ;;
+        *) printf 'copal-halt: unknown argument "%s"\n\n' "$a" >&2
+           usage >&2; exit 2 ;;
+    esac
+done
+
+case "$ACTION" in
+    poweroff) QUESTION="Shut down this machine?" ;;
+    reboot)   QUESTION="Restart this machine?" ;;
+    logout)   QUESTION="Log out of the desktop?" ;;
+esac
+
+# Asking. In X the question is a nagbar across the top of the screen, because
+# a dialog that needs a window manager to place it is a poor thing to trust at
+# the moment you are shutting the window manager down; the nagbar answers by
+# re-running this script with -y. At a console it is a plain read.
+#
+# If there is neither -- output piped somewhere, no terminal, no X -- it
+# REFUSES rather than assuming yes. "It could not ask, so it went ahead and
+# powered the machine off" is the wrong way round for the one command here
+# that cannot be undone.
+if [ "$ASK" = 1 ]; then
+    if [ -n "${DISPLAY:-}" ] && have i3-nagbar; then
+        exec i3-nagbar -t warning -m "$QUESTION" \
+             -B 'Yes' "copal-halt -y $ACTION" -B 'No' 'true'
+    elif [ -t 0 ]; then
+        printf '%s [y/N] ' "$QUESTION"
+        read -r reply || reply=n
+        case "$reply" in y|Y|yes|YES) ;; *) echo "Cancelled."; exit 0 ;; esac
+    else
+        echo "copal-halt: nothing to ask on -- re-run as: copal-halt -y $ACTION" >&2
+        exit 1
+    fi
+fi
+
+# root needs no help; anyone else goes through doas, which has a nopass rule
+# for exactly these three commands and nothing else.
+priv() {
+    if [ "$(id -u)" = 0 ]; then "$@"
+    elif have doas;  then doas "$@"
+    elif have sudo;  then sudo "$@"
+    else printf 'copal-halt: not root, and no doas -- log in as root and run %s\n' "$1" >&2
+         exit 1
+    fi
+}
+
+# Ending an i3 session before the machine goes down is not required -- OpenRC
+# will stop X either way -- but it is the difference between applications being
+# asked to quit and applications being killed.
+end_session() {
+    [ -n "${DISPLAY:-}" ] && have i3-msg || return 0
+    i3-msg exit >/dev/null 2>&1 || true
+    sleep 1
+}
+
+if [ "$ACTION" = logout ]; then
+    [ -n "${DISPLAY:-}" ] || { echo "copal-halt: not in a desktop session." >&2; exit 1; }
+    have i3-msg || { echo "copal-halt: no i3-msg." >&2; exit 1; }
+    exec i3-msg exit
+fi
+
+# sync twice, deliberately: this is a machine whose disk is an SD card and
+# whose power switch is usually the cable.
+# The ABSOLUTE path, deliberately. doas matches its 'cmd' rule against the
+# command as typed, not against what it resolves to, so `doas poweroff` does
+# not match `permit nopass :wheel cmd /sbin/poweroff` -- it falls through to
+# the general wheel rule and asks for a password, from a menu entry with no
+# terminal to type one into. On Alpine these are all busybox symlinks in
+# /sbin; command -v is the fallback for anywhere they are not.
+CMD="/sbin/$ACTION"
+[ -x "$CMD" ] || CMD=$(command -v "$ACTION" 2>/dev/null || echo "$ACTION")
+
+do_halt() {
+    end_session
+    sync; sync
+    priv "$CMD"
+}
+
+# Detach before ending the session. Launched from an i3 binding this script is
+# i3's child, and "tell i3 to exit, then power off" from a single process is a
+# race with its own death: if X takes its children down, the power-off never
+# happens and you are left at a console wondering why. setsid re-runs this in a
+# session of its own; COPAL_HALT_INNER is what stops the copy doing it again.
+if [ -z "${COPAL_HALT_INNER:-}" ] && [ -n "${DISPLAY:-}" ] && have setsid; then
+    COPAL_HALT_INNER=1 setsid "$0" -y "$ACTION" >/dev/null 2>&1 &
+    exit 0
+fi
+
+do_halt
+COPALHALT
+    chmod 0755 /usr/local/bin/copal-halt
 
     say "Installing /usr/local/bin/copal-menu"
     cat > /usr/local/bin/copal-menu <<'COPALMENU'
@@ -5238,8 +5558,10 @@ out '^sep(Session)'
 out "Reload i3,i3-msg restart"
 have i3lock && out "Lock screen,i3lock -c 1a1b26" || true
 out "Log out,i3-msg exit"
-out "Reboot,sh -c 'sync; reboot'"
-out "Shut down,sh -c 'sync; poweroff'"
+# copal-halt rather than a bare poweroff: as $PI_USER the bare one cannot
+# signal init at all, and from a menu there is no terminal for doas to ask in.
+out "Reboot,copal-halt reboot"
+out "Shut down,copal-halt"
 
 if have jgmenu; then
     exec jgmenu --simple --csv-file="$CSV"
@@ -6105,8 +6427,14 @@ COPALSPLASH
    out of workspaces.
 
  SESSION
+   Super + Shift + P    shut the machine down -- asks first, closes the
+                        session, syncs the card, powers off. This is the
+                        one to end the day with. From a shell it is
+                        "copal-halt"; "copal-halt reboot" restarts.
+   Super + Shift + Del  restart
    Super + Shift + R    reload i3 after editing its config
-   Super + Shift + E    log out of i3 (back to the console)
+   Super + Shift + E    log out of i3 (back to the console) -- this leaves
+                        the machine RUNNING. It is not a shutdown.
    Super + Shift + S    lock the screen, if i3lock is installed
 
  IF SOMETHING LOOKS WRONG
@@ -6152,6 +6480,7 @@ COPALSPLASH
      Super + ,            ->  Ctrl + Alt + ,
      Super + /            ->  Ctrl + Alt + /
      Super + Shift + Q    ->  Ctrl + Alt + Shift + Q
+     Super + Shift + P    ->  Ctrl + Alt + Shift + P
      Super + Shift + 1..5 ->  Ctrl + Alt + Shift + 1..5
      Super + Ctrl + arrow ->  Ctrl + Alt + Left / Right
 
@@ -11062,7 +11391,7 @@ MSG
 #
 # So the useful mitigations, in order of how much they actually buy:
 #
-#   1. Shut down cleanly. `poweroff`, wait for the green LED to stop, then
+#   1. Shut down cleanly. `copal-halt`, wait for the green LED to stop, then
 #      pull the plug. This is worth more than everything below combined.
 #   2. Write less, so the window in which power loss can hurt is smaller.
 #      Stage 3 already does this: /tmp and /var/log are tmpfs, the root is
@@ -11143,7 +11472,7 @@ sdcard_advice() {
     rolling dice against the card's internal metadata being mid-update. The
     single most valuable habit is:
 
-        poweroff          # or: doas poweroff
+        copal-halt        # or: poweroff, as root
 
     ...wait for the activity LED to go dark, and then pull the plug.
 

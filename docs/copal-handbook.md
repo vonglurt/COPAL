@@ -1530,8 +1530,9 @@ microsecond.
 
 So, in order of how much each actually buys you:
 
-1. **Shut down cleanly.** `poweroff`, wait for the LED to go dark, then pull
-   the plug. Worth more than everything below combined.
+1. **Shut down cleanly.** `copal-halt` (or `Super + Shift + P` in the
+   desktop), wait for the LED to go dark, then pull the plug. Worth more
+   than everything below combined.
 2. **Write less** — already done. Stage 3 puts `/tmp` and `/var/log` on tmpfs
    and mounts the root `noatime,commit=600`; stage 5's zram means swap never
    touches the card. An idle Copal desktop can go minutes without writing.
