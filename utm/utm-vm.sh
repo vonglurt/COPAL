@@ -271,6 +271,8 @@ SSH, once stage 1 has configured the network:
     ssh root@192.168.64.x
 
 Shared folder, once set in Settings &gt; Sharing:
+    stage 1 mounts it at /mnt/share and keeps it across reboots
+    (~/Shared is a symlink to it). To do it by hand:
     mount -t 9p -o trans=virtio,version=9p2000.L share /mnt/share</string>
 		<key>UUID</key>
 		<string>${vm_uuid}</string>
@@ -532,6 +534,11 @@ do_create() {
 
       UTM -> $NAME -> Edit -> Sharing -> Directory Share Path
       -> $SHARE_DIR
+
+  Point it there BEFORE running stage 1: stage 1 tries the mount, and keeps
+  it -- /mnt/share, in fstab with nofail, with ~/Shared pointing at it -- only
+  if a folder is actually being shared. Set it later and re-running stage 1
+  picks it up.
 
   Then start it:
 

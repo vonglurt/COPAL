@@ -3974,6 +3974,10 @@ stage_base_config() {
     fix_system_dir_modes
     root_handover_notes
 
+    # Before the commit, so the fstab line and the module list are inside the
+    # apkovl. On a diskless system a change made after it is a change lost.
+    configure_9p_share
+
     # Before the commit, and before anything relies on persistence.
     lbu_fix_media
 
@@ -3985,6 +3989,106 @@ stage_base_config() {
     say "Stage 1 complete."
     note "The configuration is saved. From here the system survives a reboot,"
     note "but installed packages do not -- that is what stage 2 is for."
+}
+
+# ------------------------------------------------ the folder shared with the Mac ---
+#
+# UTM shares a host folder over 9p (its "VirtFS" mode), and the guest side of
+# that has been a line in a printed note that nobody runs twice: mount it by
+# hand, lose it at the next reboot, mount it again. This makes it a mount point
+# that is simply there.
+#
+#   HOST SIDE      utm/utm-vm.sh defaults to ~/Downloads/SharedVM, and takes
+#                  --share DIR to change it. UTM keeps the path in its own
+#                  registry as a security-scoped bookmark that only the app can
+#                  mint, so it cannot be scripted: it is chosen once in
+#                  UTM -> the VM -> Edit -> Sharing -> Directory Share Path.
+#
+#   GUEST SIDE     /mnt/share, and ~/Shared as a symlink to it so the desktop
+#                  and the file manager have somewhere obvious to look.
+#
+# 'share' is the mount TAG, not a path -- QEMU's -virtfs is given that tag and
+# the guest asks for it by name. UTM always uses 'share'.
+#
+# DETECTION IS THE MOUNT ITSELF. There is no reliable way to ask "is a 9p share
+# offered?" that is cheaper or more honest than trying it: aarch64 'virt' has no
+# DMI to read, the virtio device only appears once the module is loaded, and a
+# host that has not had a folder pointed at it yet looks exactly like one that
+# has. So this attempts the mount, keeps the configuration only if it worked,
+# and says nothing alarming on a Raspberry Pi, where it simply will not.
+#
+# nofail IS LOAD-BEARING in the fstab line. A VM started with no folder shared,
+# or moved to a host that has none, would otherwise fail the mount at boot and
+# drop to an emergency shell -- turning a convenience into a machine that will
+# not start. _netdev keeps it out of the early boot ordering for the same
+# reason.
+#
+# OWNERSHIP. 9p2000.L passes the host's numeric uid straight through, and the
+# Mac's first user is 501 while this machine's is 1000, so files arrive owned by
+# a uid that does not exist here. They are readable; writing back is what
+# surprises people. There is no fix on the guest side worth having -- the
+# options that paper over it (dfltuid, access=) either do not apply to
+# 9p2000.L or silently break other things -- so it is documented instead.
+configure_9p_share() {
+    say "Shared folder with the host, if there is one"
+
+    # 9p and 9pnet_virtio are separate modules and neither is loaded by default.
+    modprobe 9pnet_virtio 2>/dev/null || true
+    modprobe 9p          2>/dev/null || true
+    if ! grep -qw 9p /proc/filesystems 2>/dev/null; then
+        note "no 9p support in this kernel -- nothing to share (normal on a Pi)"
+        return 0
+    fi
+
+    mkdir -p /mnt/share
+    _opt='trans=virtio,version=9p2000.L,msize=131072,rw'
+    if ! mount -t 9p -o "$_opt" share /mnt/share 2>/dev/null; then
+        rmdir /mnt/share 2>/dev/null || true
+        note "no folder is being shared with this machine"
+        note "  UTM -> this VM -> Edit -> Sharing -> Directory Share Path"
+        note "  then re-run this stage and it will be mounted at /mnt/share"
+        return 0
+    fi
+    note "mounted: /mnt/share  ($(ls -1 /mnt/share 2>/dev/null | wc -l | tr -d ' ') entries)"
+
+    # Persist it. Both halves are needed: the modules, because the mount at
+    # boot happens before anything would autoload them, and the fstab line.
+    if [ -f /etc/modules ]; then
+        for _m in 9pnet_virtio 9p; do
+            grep -qx "$_m" /etc/modules 2>/dev/null || echo "$_m" >> /etc/modules
+        done
+        note "/etc/modules -- 9p, 9pnet_virtio"
+    fi
+
+    if grep -q '^share[[:space:]]' /etc/fstab 2>/dev/null; then
+        note "/etc/fstab already has the share"
+    else
+        printf 'share\t/mnt/share\t9p\t%s,nofail,_netdev\t0 0\n' "$_opt" >> /etc/fstab
+        note "/etc/fstab -- /mnt/share, nofail so a host with no share still boots"
+    fi
+
+    # Somewhere obvious. pcmanfm and the file manager open on $HOME, and a
+    # mount point three directories away might as well not exist.
+    _uh=$(user_home)
+    if [ -n "$_uh" ] && [ -d "$_uh" ] && [ ! -e "$_uh/Shared" ]; then
+        ln -s /mnt/share "$_uh/Shared" 2>/dev/null \
+            && { chown -h "$(id -u "$PI_USER" 2>/dev/null || echo 0)" "$_uh/Shared" 2>/dev/null || true
+                 note "$_uh/Shared -> /mnt/share"; }
+    fi
+
+    cat <<'SHAREMSG'
+
+    Files here are shared live with the Mac -- both sides see a change
+    immediately, and nothing is copied. It is the easiest way to get a file
+    in or out of this machine, and the slowest place to compile in: 9p is a
+    network protocol pretending to be a disk. Build in your home directory
+    and copy the result here.
+
+    They arrive owned by the MAC's user id (501), which does not exist on
+    this machine, so they may read as owned by a number. Reading works;
+    if writing back is refused, write as root, or work on a copy in your
+    home directory.
+SHAREMSG
 }
 
 # ------------------------------------------- stage 2: ext4 p2 + apk cache ---
