@@ -225,6 +225,19 @@ on driveConsole(winName, initPath)
 		-- the interpreter is the form that always works.
 		keystroke "sh " & initPath
 		keystroke return
+
+		-- "Do a full automatic install?" -- the first thing copal-init.sh
+		-- asks, and it defaults to NO, so the y is not decoration: without it
+		-- the machine sits on the ordinary stage menu waiting for a person.
+		--
+		-- The wait is long because the question comes after a screen of
+		-- explanation that takes a moment to print, and on the emulated
+		-- x86_64 machine everything is several times slower than on the
+		-- aarch64 one. Typing early would send the y into the scrolling text
+		-- above the prompt, where it is simply lost.
+		delay 8
+		keystroke "y"
+		keystroke return
 	end tell
 	return "  started: " & winName
 end driveConsole
