@@ -3761,6 +3761,15 @@ admin_fix_desktop_groups() {
 # error anywhere. So it is corrected from the partition find_boot actually found,
 # on every platform, every run. On a Pi this changes nothing.
 lbu_fix_media() {
+    # Nothing reads LBU_MEDIA on a sys-installed root, and saying "lbu medium:
+    # vda1 (already correct)" there is worse than saying nothing: it is correct
+    # about a setting that cannot work, one line before the commit that proves
+    # it. /media/vda1 does not exist on such a machine -- that partition is
+    # mounted at /boot.
+    if ! is_diskless; then
+        note "lbu is not in use -- / is persistent, so there is no apkovl to write"
+        return 0
+    fi
     _want=$(basename "$(boot_device 2>/dev/null || true)" 2>/dev/null || true)
     [ -n "$_want" ] || { warn "cannot tell which device \$BOOT is on -- leaving lbu alone"; return 0; }
     [ -f /etc/lbu/lbu.conf ] || { mkdir -p /etc/lbu; : > /etc/lbu/lbu.conf; }
@@ -3982,10 +3991,35 @@ stage_base_config() {
     # Before the commit, and before anything relies on persistence.
     lbu_fix_media
 
-    say "Committing the configuration to the boot partition"
-    # Without this, nothing at all survives a reboot on a diskless system.
-    lbu commit -d || die "lbu commit failed -- see above. Nothing will persist until this works."
-    ls -l "$BOOT"/*.apkovl.tar.gz
+    # WHY THIS IS CONDITIONAL, and it did not used to be.
+    #
+    # lbu exists to rebuild a RAM-resident root from an apkovl at every boot.
+    # Once stage 3 has moved / onto p2 there is no such thing to rebuild: the
+    # root filesystem is the persistent copy, /etc is already saved because it
+    # is already on disk, and the apkovl is a snapshot nothing will ever read.
+    #
+    # Running it anyway does not merely waste effort, it FAILS -- and fails in
+    # a way that reads as a broken machine. lbu takes its medium from
+    # LBU_MEDIA and looks for /media/$LBU_MEDIA, but a sys-installed Alpine
+    # mounts that partition at /boot instead, so the directory lbu wants is
+    # simply not there. lbu answers a missing medium by printing its top-level
+    # usage and exiting 1, which is a confusing thing to hand someone: the
+    # message is about subcommands, and the actual complaint is a path.
+    #
+    # This mattered because re-running stage 1 is the documented repair for an
+    # admin account, and on a finished machine it died at the last line --
+    # after having done all of its real work.
+    if is_diskless; then
+        say "Committing the configuration to the boot partition"
+        # Without this, nothing at all survives a reboot on a diskless system.
+        lbu commit -d || die "lbu commit failed -- see above. Nothing will persist until this works."
+        ls -l "$BOOT"/*.apkovl.tar.gz
+    else
+        say "Root filesystem is persistent -- no lbu commit needed"
+        note "/ is $(root_fstype) on $(awk '$2 == "/" { print $1 }' /proc/mounts), so everything"
+        note "written above is already saved. lbu and the apkovl are for a"
+        note "RAM-resident root, which this machine stopped having at stage 3."
+    fi
 
     say "Stage 1 complete."
     note "The configuration is saved. From here the system survives a reboot,"
