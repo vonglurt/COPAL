@@ -755,14 +755,59 @@ do_status() {
 }
 
 do_delete() {
-    require_bundle
+    # NOT require_bundle. The state this most needs to handle is a bundle that
+    # is already gone while UTM still lists the machine -- which is precisely
+    # what require_bundle refuses to let you past, and precisely what needs
+    # clearing. So: proceed if there is a bundle OR a registry entry, and only
+    # complain when there is neither.
+    if [ ! -d "$BUNDLE" ] && ! utm_knows; then
+        die "no VM named '$NAME', and UTM does not list one. Nothing to delete."
+    fi
     if [ -x "$UTMCTL" ] && [ "$("$UTMCTL" status "$NAME" 2>/dev/null || echo stopped)" != stopped ]; then
         die "'$NAME' is running. Stop it first."
     fi
     [ "$FORCE" -eq 1 ] || die "This deletes $BUNDLE and everything the VM has written.
        Pass --force if that is what you want."
-    info "Deleting $BUNDLE"
-    rm -rf "$BUNDLE"
+
+    # ORDER MATTERS, and getting it wrong leaves a mess that cannot be tidied
+    # by repeating the command.
+    #
+    # This used to be `rm -rf "$BUNDLE"` and nothing else. That removes the
+    # files, but UTM is a running application holding a registry of machines it
+    # knows about -- so the entry survives, pointing at a path that is no
+    # longer there, and the sidebar keeps showing a VM that does not exist.
+    #
+    # Worse, it is then STUCK. Asking UTM to delete it afterwards fails:
+    #
+    #     UTM got an error: "Copal-aarch64.utm" couldn't be removed. (-2700)
+    #
+    # because UTM deletes a machine by trashing its package, and the package is
+    # already gone. The only ways out are recreating the bundle so UTM has
+    # something to remove, or editing UTM's preferences behind its back.
+    #
+    # So: ask UTM first, while the bundle still exists, and only remove the
+    # files ourselves if UTM would not or could not. utmctl returns success
+    # having done nothing when UTM is not running, so the check is whether the
+    # bundle actually went, not what utmctl said.
+    if [ -x "$UTMCTL" ] && utm_knows; then
+        info "Asking UTM to delete $NAME"
+        "$UTMCTL" delete "$NAME" >/dev/null 2>&1 || true
+    fi
+    if [ -d "$BUNDLE" ]; then
+        info "Deleting $BUNDLE"
+        rm -rf "$BUNDLE"
+    fi
+    # A registry entry left behind because UTM was not running when the files
+    # went: give UTM the empty bundle back so its own delete can succeed. This
+    # is the recovery for a machine deleted the old way, and it costs nothing
+    # when there is nothing to recover.
+    if [ -x "$UTMCTL" ] && utm_knows; then
+        warn "UTM still lists $NAME -- clearing the stale entry"
+        mkdir -p "$BUNDLE" 2>/dev/null || true
+        "$UTMCTL" delete "$NAME" >/dev/null 2>&1 || true
+        rm -rf "$BUNDLE" 2>/dev/null || true
+        utm_knows && warn "UTM still lists $NAME; quit UTM and try again" || info "Cleared."
+    fi
 }
 
 # copal-prep.sh --refresh rewrites only the small generated files -- answers.txt,

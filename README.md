@@ -1183,6 +1183,127 @@ you know it is there, and left for you to delete by hand.
 
 ---
 
+## The anatomy — three machines, one file, fifteen stages
+
+Copal is named for tree resin caught halfway to amber: hardened, but not yet
+stone. The design follows the metaphor more closely than the name suggests.
+Alpine is the sap — small, generic, still runny. What this repository does is
+*distil* it: hold it in a shape long enough to set, without turning it into
+something that can never be reworked. Every decision below follows from that,
+and the shape it sets into is one file.
+
+### Three machines, and only one of them is yours to keep
+
+```mermaid
+flowchart LR
+    subgraph HOST["1 · THE MAC — writes, never runs"]
+        direction TB
+        H1["<b>copal</b><br/>the front door: menu, flow chart, briefings"]
+        H2["<b>copal-prep.sh</b><br/>partitions, fetches Alpine, verifies SHA256,<br/>writes copal-init.sh onto the boot partition"]
+        H3["<b>utm/utm-vm.sh</b> · <b>copal-vm.sh</b><br/>wrap the image in a VM, or boot it under QEMU"]
+        H1 --> H2 --> H3
+    end
+    subgraph MEDIA["2 · THE MEDIUM — a card, a stick, or a .img"]
+        direction TB
+        M1["<b>COPALBOOT</b> (FAT)<br/>Alpine payload · answers.txt · copal.conf<br/><b>copal-init.sh</b> — the whole distribution, as heredocs"]
+        M2["<b>COPALROOT</b> (ext4)<br/>empty until stage 2"]
+        M1 -.-> M2
+    end
+    subgraph TARGET["3 · THE MACHINE — runs, never writes cards"]
+        direction TB
+        T1["<b>copal-init.sh</b><br/>fifteen stages, run as root"]
+        T2["<b>/usr/local/bin/copal-*</b><br/>written BY the stages, for you"]
+        T1 --> T2
+    end
+    HOST ==>|"one file crosses"| MEDIA
+    MEDIA ==>|"first boot"| TARGET
+```
+
+The asymmetry is deliberate. The Mac has the network, the disk space and the
+tooling, and does everything that needs them. The target has 512 MB and an SD
+card, and does nothing it does not have to. **Nothing travels between them but
+one shell script** — which is what makes `copal -U` a single fetch rather than
+a package manager.
+
+### What each script is for
+
+Everything on the Mac. None of it runs on the target.
+
+| Script | Runs where | Purpose |
+|---|---|---|
+| `copal` | Mac | The front door. A flow chart, a target menu, and a briefing per board — equipment, CPU, minimum requirements — shown *before* anything is erased. Writes nothing. |
+| `copal-prep.sh` | Mac | The whole distribution. Partitions the medium, fetches and SHA256-verifies the Alpine payload, lays down firmware and bootloader, and writes `copal-init.sh`. 15,186 lines, of which 12,833 are the heredoc. |
+| `copal-vm.sh` | Mac | Boots an image under plain QEMU. `--check` boots headless, greps the serial log for a login prompt, exits non-zero if it never came up — the thing to run after changing the installer. |
+| `utm/utm-vm.sh` | Mac | Wraps an image in a registered UTM machine: NAT, SSH, a serial console, and the shared folder. |
+| `fetch-minivmac.sh` | Mac | Assembles the Mini vMac working set on demand, so no binaries are vendored. |
+| `Makefile` · `bin/*.sh` | Mac | One command per intention. `bin/` shortcuts are two lines each and hand straight to `make`, so they cannot disagree with it. |
+
+And the one that crosses:
+
+| Script | Runs where | Purpose |
+|---|---|---|
+| `copal-init.sh` | Target, as root | **Generated, never edited.** It exists only as a heredoc inside `copal-prep.sh` until a medium is written. Fifteen stages, run in any order, each idempotent enough to re-run. |
+
+That "generated, never edited" is why `make lint` extracts it and runs `sh -n`
+on the file it *becomes*: a syntax error inside a heredoc is invisible to every
+check that reads the generator, and would land on the hardware instead.
+
+### The fifteen stages
+
+Roughly: 1–3 make it a computer, 4–6 make it usable, 7–15 make it yours.
+
+| | Stage | What it settles |
+|---|---|---|
+| 1 | base config | `setup-alpine` from answers; the admin account, `doas`, shells, the shared folder, the power button |
+| 2 | ext4 + apk cache | packages survive a reboot on a RAM-resident root |
+| 3 | full root filesystem | `/` moves onto the disk — **reboots**, and is the point of no return for the diskless model |
+| 4 | X.Org and i3 | the desktop, its key bindings, and every `copal-*` helper it needs |
+| 5 | zram | compressed swap in RAM — the single biggest win on 512 MB |
+| 6 | SSH key | the Mac's public key, authorised for the admin account |
+| 7 | development | gcc/make/gdb, Neovim configured for building and breakpoints |
+| 8 | grow root | extend p2 into free space, non-destructively, while mounted |
+| 9 | emulators | Mini vMac and VICE, with disk images and launchers |
+| 10 | peripherals | wifi, bluetooth, audio, capture, hex editors, disk tools |
+| 11 | snapshots | rsync snapshots on a third partition |
+| 12 | applications | the catalogue — 316 small programs |
+| 13 | hand over root | lock root, log in as yourself with `doas`. **Checks first, run it last** |
+| 14 | the workshop | CAD, KiCad, ngspice, LaTeX, trackers |
+| 15 | SD card care | what actually wears a card; log policy; a genuinely read-only root |
+
+### What the machine gains
+
+Every one of these is written *by* a stage and lives on the target. They are
+the distinction between an installer and a distribution: the installer stops,
+these stay.
+
+| Command | Purpose |
+|---|---|
+| `copal` | The front door on the machine itself: the stage menu, `-U` to update, `--version` |
+| `copal-halt` | End the session and the machine in one step — shell, menu, or `Super+Shift+P` |
+| `copal-startx` | Start the desktop as the account that should own it, and record the session |
+| `copal-menu` · `copal-center` | The app menu and the control panel, both rebuilt from what is installed |
+| `copal-config` | Users, hostname, timezone, services, SSH, boot options |
+| `copal-install` · `copal-guide` | Fetch one catalogue entry; read the plain-text guides |
+| `copal-logs` · `copal-debug` | The log collection, and the switch that is off by default |
+| `copal-ssh` · `copal-logflush` · `copal-splash` | SSH policy; RAM logs down to the card; the key bindings on the wallpaper |
+| `snapshot` · `mountdsk` | rsync snapshots; mount a disk image |
+
+### Why one file, and not packages
+
+The obvious design is an apk repository and a metapackage. This is not that,
+and the reason is the failure mode rather than the happy path. A package
+manager is another network service to be down, another signing key to expire,
+another index to be stale — on a board whose most common problem is *no network
+yet*. One shell script on a FAT partition can be read by the Mac that wrote it,
+edited with `vi` over a serial console, checked with `sh -n` before it is
+trusted, and replaced by copying one file over another.
+
+It is also what makes the whole system inspectable. There is no state hidden in
+a database: what the machine will do is a file you can read, and what it has
+done is a transcript beside it.
+
+---
+
 ## Targets
 
 A target is the pair *(what medium it is written to, what loads the kernel)*.

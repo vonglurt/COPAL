@@ -128,6 +128,40 @@ be retyped at the Pi's console.
 Licensed **MIT**. See `LICENSE` for the scope, which matters here — third-party
 material is stored alongside and is *not* covered.
 
+## The shape of the system
+
+Three machines, and only one file crosses between them.
+
+```mermaid
+flowchart LR
+    A["<b>THE MAC</b><br/>copal · copal-prep.sh · utm-vm.sh<br/><i>writes, never runs</i>"]
+    B["<b>THE MEDIUM</b><br/>COPALBOOT (FAT) + COPALROOT (ext4)<br/><b>copal-init.sh</b> lives here"]
+    C["<b>THE MACHINE</b><br/>fifteen stages, then /usr/local/bin/copal-*<br/><i>runs, never writes cards</i>"]
+    A ==>|"one shell script"| B ==>|"first boot"| C
+```
+
+The Mac has the network, the disk and the tooling, and does everything needing
+them: partitioning, downloading, verifying checksums, laying down firmware. The
+target has 512 MB and an SD card and does nothing it does not have to.
+
+`copal-init.sh` is **generated, never edited**. It exists only as a heredoc
+inside `copal-prep.sh` until a medium is written, which is why `make lint`
+extracts it and syntax-checks the file it *becomes* — an error inside a heredoc
+is invisible to any check that reads the generator, and would land on hardware
+instead.
+
+That single file is also the entire update mechanism. Every stage, guide,
+helper and the whole catalogue live inside it, so `copal -U` is one fetch and
+one `sh -n` rather than a package manager, an index and a signing key — none of
+which help on a board whose commonest problem is having no network yet.
+
+The name is the design. Copal is tree resin caught halfway to amber: hardened,
+but not yet stone. Alpine is the sap — small, generic, still runny. This
+repository distils it: holds it in a shape long enough to set, without turning
+it into something that can never be reworked. Nothing here is compiled, minified
+or hidden in a database. What the machine will do is a file you can read; what
+it has done is a transcript beside it.
+
 ## Repository contents
 
 **This repository tracks no binaries at all.** That is a change from the
