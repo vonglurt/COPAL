@@ -32,6 +32,20 @@
 # `make distclean` takes both. See the cleaning section for how, and why the
 # exclusion is written as an exclusion rather than a list.
 BUILDDIR ?= build
+
+# ONE build id per press of make, shared by every image that press produces.
+#
+# := not =, and that is the whole mechanism: a simply-expanded variable runs
+# its shell once, when the Makefile is read, so `make all` stamps its nine
+# images with the same eight characters instead of nine different ones. A
+# recursively-expanded '=' would re-run od for every image and every reference,
+# which is precisely the bug this avoids.
+#
+# Exported, so copal-prep.sh takes it from the environment rather than
+# generating its own. A press is the unit of identity here: the images from one
+# `make alldebug` are a set, and being able to see that is the point.
+BUILD_ID := $(shell od -An -N4 -tx1 /dev/urandom | tr -d ' \n' | cut -c1-8)
+export BUILD_ID
 CACHEDIR ?= $(BUILDDIR)/cache
 
 # MODEL FIRST, AND EVERY GENERATED NAME DERIVED FROM IT.

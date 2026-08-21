@@ -169,18 +169,53 @@ end tell
 on driveConsole(winName, initPath)
 	tell application "System Events" to tell process "UTM"
 		set matched to false
+		set wpos to {0, 0}
+		set wsize to {0, 0}
 		repeat with w in windows
 			if name of w is winName then
 				perform action "AXRaise" of w
+				set wpos to position of w
+				set wsize to size of w
 				set matched to true
 				exit repeat
 			end if
 		end repeat
 		if not matched then return "  not found: " & winName
-		delay 1.5
+		set frontmost to true
+		delay 1
+
+		-- CLICK, not only a raise. Raising puts the window in front; it does
+		-- not always give the console view inside it the keyboard, and
+		-- keystrokes then go to whatever did have it -- which at that moment
+		-- is some other window on this desktop. Clicking into the console is
+		-- what makes the typing land where it is aimed.
+		--
+		-- Safe HERE because these are the serial windows: a serial console is
+		-- a text view and UTM does not capture the pointer over it. The same
+		-- click into a graphical VM display would grab the mouse and need
+		-- Ctrl-Option to get it back, which is why nothing below goes near
+		-- the graphical windows.
+		--
+		-- A third of the way down, not the middle: far enough from the title
+		-- bar to be inside the view, and clear of anything at the bottom edge.
+		set cx to (item 1 of wpos) + ((item 1 of wsize) div 2)
+		set cy to (item 2 of wpos) + ((item 2 of wsize) div 3)
+		click at {cx, cy}
+		delay 1
+
+		-- root, with a blank password until stage 1 sets one. Enter twice:
+		-- the login prompt takes the name, and the password prompt takes an
+		-- empty line.
 		keystroke "root"
 		keystroke return
 		delay 2
+		keystroke return
+		delay 2
+
+		-- 'sh <path>', which is what the boot notes and the handbook tell a
+		-- person to type. The file is on a FAT partition, where the execute
+		-- bit is a mount option rather than a property of the file, so naming
+		-- the interpreter is the form that always works.
 		keystroke "sh " & initPath
 		keystroke return
 	end tell
