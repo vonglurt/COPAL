@@ -3998,6 +3998,8 @@ stage_base_config() {
     setup-alpine -f "$ANSWERS"
     tui_resume
 
+    dedupe_repositories
+
     # Before the commit, so the synced password goes into the same apkovl.
     admin_sync_password || warn "'$PI_USER' may not be able to log in -- check 'passwd $PI_USER'"
     # Unconditional, and deliberately after the || above: a password sync that
@@ -4258,6 +4260,40 @@ ACPIHANDLER
     power outright -- that is the hypervisor pulling the plug and nothing in
     here can soften it.
 PWRMSG
+}
+
+# setup-alpine APPENDS its mirror lines rather than replacing them, so every
+# re-run of stage 1 adds another copy of the same repository. Seen in the wild
+# here: main listed twice, and the community line present both commented and
+# uncommented. Nothing breaks -- apk tolerates it -- but every `apk update`
+# then downloads the same index twice, on a board where that is a real cost,
+# and the file stops being readable as a statement of what this machine uses.
+#
+# Order is preserved and the FIRST occurrence wins, because in a repositories
+# file order is preference: an earlier line is the mirror apk reaches for
+# first, and quietly promoting a later duplicate would change which mirror a
+# machine actually uses.
+#
+# Commented lines are kept exactly as they are. They are how Alpine ships the
+# "here is the community repository, uncomment to enable" hint, and a dedupe
+# that silently deleted them would be editing documentation, not configuration.
+dedupe_repositories() {
+    _f=/etc/apk/repositories
+    [ -f "$_f" ] || return 0
+    _before=$(grep -c . "$_f" 2>/dev/null || echo 0)
+    # awk over live lines only: blank and commented lines pass through
+    # untouched, everything else is emitted the first time it is seen.
+    awk '/^[[:space:]]*(#|$)/ { print; next } !seen[$0]++ { print }' "$_f" > "$_f.new" 2>/dev/null || {
+        rm -f "$_f.new"; return 0; }
+    [ -s "$_f.new" ] || { rm -f "$_f.new"; return 0; }
+    _after=$(grep -c . "$_f.new" 2>/dev/null || echo 0)
+    if [ "$_before" = "$_after" ]; then
+        rm -f "$_f.new"
+        return 0
+    fi
+    cp "$_f" "$_f.bak" 2>/dev/null || true
+    mv "$_f.new" "$_f"
+    note "/etc/apk/repositories -- removed $(( _before - _after )) duplicate line(s)"
 }
 
 # The debug marker the Mac may have left on the boot partition. Copied onto the
@@ -5268,9 +5304,62 @@ stage_gui() {
     fi
     note "terminal: $TERMEMU"
 
+    # ------------------------------------------------------------------
+    # Shared clipboard with the Mac, on a VM that offers one.
+    #
+    # UTM already attaches the SPICE agent channel -- it is there as
+    # /dev/virtio-ports/com.redhat.spice.0 on a machine created by utm-vm.sh,
+    # without anything being asked for. What is missing is the guest half, and
+    # without it "Enable Clipboard Sharing" in UTM's settings is a switch wired
+    # to nothing: the host offers a channel and no one answers.
+    #
+    # DETECTED BY THE PORT, not by asking what kind of machine this is. The
+    # port exists exactly when a hypervisor is offering the channel, which is
+    # the actual question -- so this installs itself on a UTM or QEMU guest and
+    # is skipped in silence on a Pi, with no VM check to keep in step with
+    # reality. Same shape as the 9p share: the thing that can answer is asked.
+    #
+    # TWO PROCESSES, and both are needed. spice-vdagentd is the system daemon
+    # that owns the virtio port; spice-vdagent is a per-session program that
+    # runs inside X and is what actually syncs the selection. The daemon is
+    # started here; the session half is launched from ~/.xinitrc, because a
+    # clipboard agent with no X session to read a selection from has nothing to
+    # do. That is also why this cannot help a machine whose desktop will not
+    # start -- there is no selection to share until there is an X server.
+    #
+    # It brings dynamic resolution with it, which on a VM window that gets
+    # dragged around is worth as much as the clipboard.
+    if [ -e /dev/virtio-ports/com.redhat.spice.0 ]; then
+        say "This machine is offered a clipboard channel -- installing the agent"
+        if add_optional spice-vdagent; then
+            rc-update add spice-vdagentd default >/dev/null 2>&1 || true
+            rc-service spice-vdagentd restart >/dev/null 2>&1 \
+                || rc-service spice-vdagentd start >/dev/null 2>&1 || true
+            if rc-service spice-vdagentd status >/dev/null 2>&1; then
+                note "spice-vdagentd running -- copy and paste both ways once X is up"
+            else
+                warn "spice-vdagentd did not start -- 'rc-service spice-vdagentd start' to see why"
+            fi
+            note "UTM must also have Edit > Sharing > Enable Clipboard Sharing on"
+            note "Files go through /mnt/share instead -- the clipboard is text, not files"
+        else
+            warn "spice-vdagent is not available -- no shared clipboard"
+            note "it lives in the community repository; check /etc/apk/repositories"
+        fi
+    else
+        note "no clipboard channel offered by the host -- skipping the agent"
+    fi
+
     say "Writing ~/.xinitrc"
     cat > /tmp/xinitrc.$$ <<'XINIT'
 [ -f "$HOME/.Xresources" ] && xrdb -merge "$HOME/.Xresources"
+# The session half of the shared clipboard. Guarded twice: the binary may not
+# be installed (a Pi, or a VM offering no channel), and the port may not exist
+# even where it is. Backgrounded because it does not exit -- it runs for as
+# long as the session does.
+if [ -x /usr/bin/spice-vdagent ] && [ -e /dev/virtio-ports/com.redhat.spice.0 ]; then
+    /usr/bin/spice-vdagent &
+fi
 # A flat colour rather than a wallpaper: an image costs framebuffer bandwidth
 # this board does not have to spare.
 # A solid colour before i3 starts, so the first frame is never the X root
