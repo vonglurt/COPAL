@@ -132,6 +132,115 @@ MIN_CARD_BYTES=$((1024 * 1024 * 1024))   # refuse anything under 1 GB
 die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 info() { printf '\033[36m==>\033[0m %s\n' "$*" >&2; }
 warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
+hint() { printf '    \033[2m%s\033[0m\n' "$*" >&2; }
+
+# ---------------------------------------------- showing the work, and timing it
+#
+# WHY THIS EXISTS. Writing an image is a sequence of destructive commands
+# against a block device, and until now they ran silently behind a sentence
+# describing them. That is the wrong way round for this particular script: the
+# commands ARE the interesting part, they were chosen carefully, and someone
+# reading the output is usually trying to learn what a card actually needs or
+# to work out which of them just failed. Printing the exact command turns the
+# build into something you can follow, copy a line out of, and reason about.
+#
+# It is also what makes the timing table at the end meaningful. "Formatting
+# took 40 seconds" is only useful when you can see it was one newfs_msdos call.
+#
+# Every command is printed as it would be typed, prefixed with '$', before it
+# runs -- before, so a command that hangs has already told you what it is.
+
+BUILD_PHASES=""          # name<TAB>seconds, one per line, in order
+BUILD_T0=$(date +%s)
+PHASE_NAME=""
+PHASE_T0=""
+
+hms_host() {  # seconds -> "1h 02m 03s" / "2m 03s" / "9s"
+    _h=$1
+    if   [ "$_h" -ge 3600 ]; then printf '%dh %02dm %02ds' $((_h/3600)) $((_h%3600/60)) $((_h%60))
+    elif [ "$_h" -ge 60 ];   then printf '%dm %02ds' $((_h/60)) $((_h%60))
+    else                          printf '%ds' "$_h"
+    fi
+}
+
+phase() {  # <name> -- closes the previous phase, opens this one
+    phase_end
+    PHASE_NAME="$1"
+    PHASE_T0=$(date +%s)
+    printf '\n\033[1;35m--- %s \033[0m\033[2m%s\033[0m\n' "$1" \
+        "$(printf '%*s' $(( 60 - ${#1} )) '' | tr ' ' '-')" >&2
+}
+
+phase_end() {
+    [ -n "$PHASE_NAME" ] || return 0
+    _pe=$(( $(date +%s) - PHASE_T0 ))
+    BUILD_PHASES="${BUILD_PHASES}${PHASE_NAME}\t${_pe}\n"
+    printf '\033[2m    %s took %s\033[0m\n' "$PHASE_NAME" "$(hms_host "$_pe")" >&2
+    PHASE_NAME=""
+}
+
+# run <command...>  -- print it, run it, time it, report failure.
+# Output is left alone: whatever the command prints, you see. Use runq for the
+# ones whose output is noise.
+run() {
+    printf '    \033[32m$\033[0m \033[1m%s\033[0m\n' "$*" >&2
+    _rt0=$(date +%s)
+    "$@"
+    _rrc=$?
+    _rel=$(( $(date +%s) - _rt0 ))
+    # Only remark on the time when there was some: a table of "0s" lines
+    # teaches nothing and buries the two commands that were slow.
+    [ "$_rel" -ge 2 ] && printf '      \033[2m^ %s\033[0m\n' "$(hms_host "$_rel")" >&2
+    [ "$_rrc" -ne 0 ] && printf '      \033[33m^ exit %d\033[0m\n' "$_rrc" >&2
+    return "$_rrc"
+}
+
+# The same, with stdout and stderr discarded. For commands that are run for
+# their effect and whose chatter would drown the commands around them --
+# diskutil unmount saying "Volume ... unmounted" forty times, mostly.
+runq() {
+    printf '    \033[32m$\033[0m \033[1m%s\033[0m\033[2m  >/dev/null\033[0m\n' "$*" >&2
+    _rt0=$(date +%s)
+    "$@" >/dev/null 2>&1
+    _rrc=$?
+    _rel=$(( $(date +%s) - _rt0 ))
+    [ "$_rel" -ge 2 ] && printf '      \033[2m^ %s\033[0m\n' "$(hms_host "$_rel")" >&2
+    return "$_rrc"
+}
+
+# Printed at the end of a build: where the wall clock actually went, in the
+# order it happened rather than sorted, because the order is the thing being
+# reasoned about when the question is "what should run earlier".
+build_time_report() {
+    phase_end
+    _bt=$(( $(date +%s) - BUILD_T0 ))
+    [ -n "$BUILD_PHASES" ] || return 0
+    printf '\n\033[1m  Image build -- where the time went\033[0m\n' >&2
+    printf '  %s\n' '------------------------------------------------------------' >&2
+    printf '%b' "$BUILD_PHASES" | awk -F'\t' -v tot="$_bt" '
+        $1 != "" {
+            pct = (tot > 0) ? $2 * 100 / tot : 0
+            n = int(pct / 4)
+            bar = ""
+            for (i = 0; i < 25; i++) bar = bar (i < n ? "=" : " ")
+            printf "  %-26.26s %6ds %5.1f%%  [%s]\n", $1, $2, pct, bar
+        }' >&2
+    printf '  %s\n' '------------------------------------------------------------' >&2
+    printf '  %-26.26s %6ds\n\n' "total" "$_bt" >&2
+    # Machine-readable beside the image, same idea as the guest's
+    # install-times.tsv: a build worth timing is a build worth comparing
+    # against the next one.
+    if [ -n "${IMAGE_PATH:-}" ]; then
+        _tf="${IMAGE_PATH%.img}-build-times.tsv"
+        {
+            printf '#copal-build-times v1\n'
+            printf '#build\t%s\t%s\t%s\n' "${BUILD_ID:-?}" "${BUILD_DATE:-?}" "${MODEL:-${ARCH:-?}}"
+            printf '#phase\tseconds\n'
+            printf '%b' "$BUILD_PHASES"
+            printf 'total\t%s\n' "$_bt"
+        } > "$_tf" 2>/dev/null && info "Build timings: $_tf"
+    fi
+}
 
 # "16g", "512m" -> bytes. Empty output means "not a size", which every caller
 # treats as fatal -- a silently misparsed size would create a useless image.
@@ -756,10 +865,22 @@ on_interrupt() {
 release_image() {
     [ -n "${IMAGE_DEV:-}" ] || return 0
     [ -e "$IMAGE_DEV" ] || { IMAGE_DEV=""; return 0; }
-    sync 2>/dev/null || true
-    diskutil unmountDisk "$IMAGE_DEV" >/dev/null 2>&1 || true
-    hdiutil detach "$IMAGE_DEV" >/dev/null 2>&1 \
-        || hdiutil detach -force "$IMAGE_DEV" >/dev/null 2>&1 || true
+    # THE ORDER MATTERS and is the reason this is three commands rather than
+    # one: sync flushes what the copy left in the buffer cache, unmountDisk
+    # takes every volume on the device down so nothing holds it open, and only
+    # then can detach succeed. Detaching a device with a mounted volume on it
+    # is what leaves a phantom /dev/diskN that the next run trips over.
+    hint "sync, then unmount every volume, then detach -- in that order."
+    run sync || true
+    runq diskutil unmountDisk "$IMAGE_DEV" || true
+    if ! runq hdiutil detach "$IMAGE_DEV"; then
+        # -force is a last resort, not the default: it detaches whether or not
+        # anything still holds the device, which is the right thing when the
+        # alternative is leaving it attached forever, and the wrong thing to
+        # reach for first.
+        hint "Plain detach refused -- something still holds it. Forcing."
+        runq hdiutil detach -force "$IMAGE_DEV" || true
+    fi
     IMAGE_DEV=""
 }
 
@@ -779,6 +900,11 @@ release_image() {
 # in anything else silently rewrites the exit code of the whole script.
 on_exit() {
     _exit_status=$?
+    # The timing table on the way out, so a build that DIED still says where
+    # its time went -- which is exactly when that is most worth knowing, and
+    # is the reason this is in the exit trap rather than at the end of the
+    # script. Failures are silent about their cost otherwise.
+    build_time_report 2>/dev/null || true
     if [ -n "${IMAGE_DEV:-}" ] && [ -e "${IMAGE_DEV:-/nonexistent}" ]; then
         printf '\033[33mReleasing %s (%s).\033[0m\n' "$IMAGE_DEV" "${IMAGE_PATH:-image}" >&2
         release_image
@@ -824,39 +950,77 @@ fetch_payload() {
     local archive="$CACHEDIR/$TARBALL"
     local sumfile="$CACHEDIR/${TARBALL}.sha256"
 
+    phase "Payload"
     info "Release : Alpine ${ALPINE_VER} (${ARCH})"
     info "Source  : $URL"
+    info "Cache   : $CACHEDIR"
 
-    # Checksum first -- it is tiny, and re-fetching it each run means a stale
-    # or partially-downloaded archive is always detected.
-    curl -fsSL -o "$sumfile" "${URL}.sha256" \
+    # THE ORDER HERE IS THE POINT, so it is stated rather than implied:
+    #
+    #   1. fetch the checksum, always, even when the archive is already here
+    #   2. check any existing archive against it
+    #   3. download only if there is no archive or it failed the check
+    #   4. check again afterwards
+    #
+    # Step 1 is not skipped for a cached archive, and that is deliberate. The
+    # checksum is a few dozen bytes and re-fetching it is what makes a stale
+    # cache detectable at all: a payload cached against Alpine 3.24.0 and a
+    # build now asking for 3.24.1 differ only in a file we would never look
+    # at if we trusted the cache. Step 4 re-checks what step 3 wrote, because
+    # a transfer that curl reports as successful can still be truncated by a
+    # full disk.
+    hint "The checksum is fetched EVERY run, cached archive or not -- it is"
+    hint "how a stale or partial cache is noticed."
+    run curl -fsSL -o "$sumfile" "${URL}.sha256" \
         || die "could not download the checksum from ${URL}.sha256 -- check the version/arch and your network"
+    hint "Expecting: $(awk '{print $1}' "$sumfile" 2>/dev/null | cut -c1-32)..."
 
     if [ -f "$archive" ]; then
-        info "Found an existing $TARBALL; verifying..."
-        if (cd "$CACHEDIR" && shasum -a 256 -c "${TARBALL}.sha256" >/dev/null 2>&1); then
-            info "Checksum matches; skipping download."
+        info "Cache hit: $TARBALL ($(du -h "$archive" 2>/dev/null | awk '{print $1}')), verifying before trusting it"
+        if run sh -c "cd '$CACHEDIR' && shasum -a 256 -c '${TARBALL}.sha256'"; then
+            info "Checksum matches -- no download needed."
+            hint "This is the fast path: nothing crosses the network but the"
+            hint "checksum, and the next phase starts immediately."
         else
-            warn "existing archive failed verification; re-downloading"
-            rm -f "$archive"
+            warn "the cached archive does NOT match the checksum."
+            hint "Expected when: the version changed, an earlier download was"
+            hint "interrupted, or the file was modified. Not expected"
+            hint "otherwise -- a mismatch on an untouched cache of the same"
+            hint "version is worth being suspicious about."
+            hint "Discarding it and fetching again."
+            run rm -f "$archive"
         fi
+    else
+        info "Cache miss: no $TARBALL yet -- it will be downloaded."
     fi
 
     if [ ! -f "$archive" ]; then
         case "$PLATFORM" in
-            rpi) info "Downloading $TARBALL (~69 MB)..." ;;
-            pc)  info "Downloading $TARBALL (~260-390 MB -- it carries every module)..." ;;
+            rpi) info "Downloading $TARBALL (expect ~69 MB)" ;;
+            pc)  info "Downloading $TARBALL (expect ~260-390 MB -- it carries every kernel module)" ;;
         esac
-        # -C - resumes an interrupted transfer rather than starting over.
-        curl -fL -C - -o "$archive" "$URL" \
+        hint "-C - resumes a partial file rather than starting over, so an"
+        hint "interrupted run costs only what it had not yet fetched."
+        hint "-f makes curl fail on an HTTP error instead of saving the error"
+        hint "page as though it were the payload."
+        run curl -fL -C - -o "$archive" "$URL" \
             || die "download failed: $URL"
+        info "Got $(du -h "$archive" 2>/dev/null | awk '{print $1}')"
     fi
 
-    info "Verifying SHA256..."
-    (cd "$CACHEDIR" && shasum -a 256 -c "${TARBALL}.sha256") \
+    info "Verifying SHA256 of the payload that will actually be written"
+    hint "Run again after the download: curl can report success on a transfer"
+    hint "the filesystem then truncated. This is the check that decides"
+    hint "whether anything is written to the card at all."
+    run sh -c "cd '$CACHEDIR' && shasum -a 256 -c '${TARBALL}.sha256'" \
         || die "CHECKSUM MISMATCH -- the download is corrupt or tampered with. Refusing to write it to the card."
 
-    info "Extracting..."
+    phase "Extract"
+    info "Extracting the payload"
+    hint "COPYFILE_DISABLE=1 keeps macOS AppleDouble files (._foo) out of the"
+    hint "tree -- they would be copied onto the card and confuse nothing on"
+    hint "Linux, but they are noise on a boot partition that is read by"
+    hint "firmware."
     local dest="$CACHEDIR/${TARBALL%.tar.gz}"
     rm -rf "$dest"
     mkdir -p "$dest"
@@ -1243,10 +1407,12 @@ attach_image() {
         info "Image   : $IMAGE_PATH (exists, $(du -h "$IMAGE_PATH" | awk '{print $1}') on disk -- will be repartitioned)"
     else
         seek_mb=$(( IMAGE_BYTES / 1024 / 1024 ))
-        # Sparse: seek past the end and write nothing, so a 16g image costs
-        # only what is actually written to it. mkfile without -n would take
-        # the full size up front, and minutes doing it.
-        dd if=/dev/zero of="$IMAGE_PATH" bs=1m count=0 seek="$seek_mb" 2>/dev/null \
+        hint "count=0 seek=$seek_mb writes NOTHING and moves the end of the file"
+        hint "to ${IMAGE_SIZE}. The result is sparse: it costs only what is"
+        hint "actually written later, so a 64g image is a few hundred MB on"
+        hint "disk. mkfile would allocate the whole size up front, and spend"
+        hint "minutes doing it."
+        run dd if=/dev/zero of="$IMAGE_PATH" bs=1m count=0 seek="$seek_mb" \
             || die "could not create $IMAGE_PATH"
         info "Image   : $IMAGE_PATH (created sparse, ${IMAGE_SIZE})"
     fi
@@ -1254,6 +1420,13 @@ attach_image() {
     # CRawDiskImage: treat the file as a bare sector image with no header, which
     # is what a card is and what QEMU expects back. Without it hdiutil looks for
     # a UDIF or DMG structure and declines a file that has neither.
+    hint "CRawDiskImage: treat the file as bare sectors with no header, which"
+    hint "is what a card is and what QEMU expects back. Without it hdiutil"
+    hint "looks for a UDIF/DMG structure and declines a file that has neither."
+    hint "-nomount: attach the device but do not let macOS mount anything on"
+    hint "it yet -- the partition table is about to be rewritten."
+    printf '    \033[32m$\033[0m \033[1m%s\033[0m\n' \
+        "hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount $IMAGE_PATH" >&2
     IMAGE_DEV=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$IMAGE_PATH" \
                 | awk 'NR==1 { print $1 }') \
         || die "hdiutil could not attach $IMAGE_PATH"
@@ -1498,15 +1671,22 @@ info "Re-checked /dev/$DISK: still the device you selected."
 ERASED=1
 # MBRFormat: the Pi firmware reads an MBR/FDisk partition table, not GPT.
 # MS-DOS FAT32 boot partition, remainder left as free space for ext4 later.
-info "Partitioning /dev/$DISK (MBR: FAT32 ${BOOT_SIZE} '${BOOT_LABEL}' + ${ROOT_SIZE_LABEL} '${ROOT_LABEL}')..."
-diskutil unmountDisk "/dev/$DISK" >/dev/null 2>&1 || true
+phase "Partition"
+info "Partitioning /dev/$DISK (MBR: FAT32 ${BOOT_SIZE} '${BOOT_LABEL}' + ${ROOT_SIZE_LABEL} '${ROOT_LABEL}')"
+hint "MBRFormat, not GPT: the Pi firmware reads an MBR/FDisk table."
+hint "Everything on /dev/$DISK is destroyed by the next command."
+hint "Unmount first -- diskutil refuses to partition a mounted disk, and"
+hint "macOS mounts a FAT volume the moment it appears."
+runq diskutil unmountDisk "/dev/$DISK" || true
 if [ "$ROOT_SIZE" = "R" ]; then
     # No trailing "Free Space" entry: p2 takes everything left.
-    diskutil partitionDisk "/dev/$DISK" MBRFormat \
+    hint "p2 gets 'R' -- the remainder of the card, so nothing is stranded."
+    run diskutil partitionDisk "/dev/$DISK" MBRFormat \
         MS-DOS "$BOOT_LABEL" "$BOOT_SIZE" \
         MS-DOS "$ROOT_LABEL" R
 else
-    diskutil partitionDisk "/dev/$DISK" MBRFormat \
+    hint "p2 is fixed at $ROOT_SIZE, and the remainder is left unformatted."
+    run diskutil partitionDisk "/dev/$DISK" MBRFormat \
         MS-DOS "$BOOT_LABEL" "$BOOT_SIZE" \
         MS-DOS "$ROOT_LABEL" "$ROOT_SIZE" \
         "Free Space" %noformat% R
@@ -1515,9 +1695,14 @@ fi
 # p2 is created as FAT only because macOS has no ext4 support; the filesystem
 # is replaced on the Pi. Set the MBR type byte to 0x83 (Linux) so the partition
 # is not mistaken for a FAT volume, and unmount it so macOS stops touching it.
-info "Setting partition 2 type to Linux (0x83)..."
-diskutil unmount "${DISK}s2" >/dev/null 2>&1 || true
-printf 't 2\n83\nw\ny\nq\n' | sudo fdisk -e "/dev/$DISK" >/dev/null 2>&1 \
+info "Setting partition 2 type to Linux (0x83)"
+hint "diskutil made p2 FAT because macOS cannot make ext4. The type BYTE is"
+hint "corrected here so macOS stops offering to mount it and Linux reads it"
+hint "as a Linux partition. The filesystem itself is replaced on the target."
+hint "fdisk -e is interactive, so the answers are piped: t=type, 2=partition,"
+hint "83=Linux, w=write, y=confirm, q=quit."
+runq diskutil unmount "${DISK}s2" || true
+printf 't 2\n83\nw\ny\nq\n' | runq sudo fdisk -e "/dev/$DISK" \
     || warn "could not set the type byte on p2 (harmless; mkfs.ext4 overwrites it anyway)"
 
 # On a PC, partition 1 has to be an EFI System Partition: type 0xEF. The Pi
@@ -1545,9 +1730,15 @@ info "Marking partition 1 bootable..."
 printf 'f 1\nw\ny\nq\n' | sudo fdisk -e "/dev/$DISK" >/dev/null 2>&1 \
     || warn "could not set the bootable flag (usually harmless; continuing)"
 
+phase "Mount"
+# macOS needs a moment after a format before the volume can be mounted by
+# name; without this the mount below fails on a device that is about to work.
+hint "A two-second pause: macOS re-scans a freshly formatted device"
+hint "asynchronously, and mounting it too early fails on a disk that is"
+hint "perfectly good a moment later."
 sleep 2
 MNT="/Volumes/$BOOT_LABEL"
-diskutil mount "${DISK}s1" >/dev/null 2>&1 || true
+runq diskutil mount "${DISK}s1" || true
 [ -d "$MNT" ] || die "expected $MNT to be mounted after formatting; check 'diskutil list'"
 assert_mount_is "$MNT" "$DISK"
 
@@ -1562,10 +1753,18 @@ step "Copy the Alpine payload onto ${BOOT_LABEL}" \
     "" \
     "May take several minutes on a slow card."
 
-# COPYFILE_DISABLE stops macOS writing ._AppleDouble sidecar files.
-info "Copying payload to $MNT ..."
+phase "Copy payload"
+info "Copying payload to $MNT"
+hint "cp -Rp of FILES, not dd of an image. Writing an Alpine ISO to the card"
+hint "as a block image is the original boot-rainbow failure this whole"
+hint "procedure exists to avoid: the ISO carries its own filesystem and"
+hint "partition layout, and the firmware cannot read either."
+hint "-p preserves modes and times; 'cd \$SRC && cp -Rp .' copies the"
+hint "CONTENTS rather than the directory itself."
+hint "COPYFILE_DISABLE=1 suppresses macOS ._AppleDouble sidecar files."
+hint "$(( SRC_BYTES / 1024 / 1024 )) MiB to write -- minutes on a slow card."
 export COPYFILE_DISABLE=1
-(cd "$SRC" && cp -Rp . "$MNT/")
+run sh -c "cd '$SRC' && cp -Rp . '$MNT/'"
 
 fi   # end of the destructive block skipped by --refresh
 
@@ -15163,6 +15362,7 @@ copal-times -- how long each package took to install.
   copal-times             the slowest packages, and what they cost
   copal-times all         every package, slowest first
   copal-times groups      where the time went, by section
+  copal-times order       what pulled the most in, and where it sat
   copal-times total       one line: packages, failures, wall-clock
   copal-times csv         the whole record as CSV, for analysis elsewhere
   copal-times --motd      regenerate the login summary (needs root)
@@ -15268,6 +15468,65 @@ report() {  # <how many rows, or "all">
     printf '\n'
 }
 
+# ORDER -- the view that exists to be acted on.
+#
+# The report ranks by time, which answers "what was slow". This ranks by
+# dependencies pulled, which answers "what would move". They are different
+# questions and usually different packages: the slowest package is often just
+# large, while the package that PULLED the most is the one whose position in
+# the sequence decided what everything after it cost.
+#
+# What this can and cannot say, stated plainly because acting on it wrongly
+# wastes an hour: the record holds HOW MANY packages each call pulled, not
+# WHICH. So it can point at the packages whose position matters, and it cannot
+# prove that moving one will help -- two hubs may share most of their
+# dependencies, in which case reordering them changes nothing. Use it to pick
+# what to try, and the next build'"'"'s numbers to judge whether it worked.
+order() {
+    _total=$(tot); [ "$_total" -gt 0 ] || _total=1
+    printf '\n  \033[1mWhat pulled the most in, and where it sat\033[0m\n'
+    printf '  %-22s %6s %7s %8s  %s\n' PACKAGE PULLED TIME 'POSITION' GROUP
+    printf '  %s\n' '----------------------------------------------------------------'
+    awk -F'\t' "$NORM"'
+        st == "ok" && deps > 1 {
+            printf "%d\t%s\t%d\t%d\t%d\t%s\n", deps, pkg, secs, idx, tt, gp
+        }
+    ' "$TIMES" | sort -t"$(printf '\t')" -k1 -rn | head -12 \
+      | while IFS="$(printf '\t')" read -r _d _pkg _sec _idx _tt _grp; do
+            # "1 of 12" is the interesting case: a package that was FIRST in
+            # its group and pulled a lot bought the dependencies that every
+            # package after it then got free. Its time is the group'"'"'s setup
+            # cost wearing one package'"'"'s name.
+            if [ "${_idx:-0}" -gt 0 ] && [ "${_tt:-0}" -gt 0 ]; then
+                _pos="$_idx of $_tt"
+            else
+                _pos="?"
+            fi
+            printf '  %-22.22s %5s+ %6ss %8s  %.24s\n' \
+                "$_pkg" "$((_d - 1))" "$_sec" "$_pos" "${_grp:-?}"
+        done
+    printf '\n'
+    # The concentration, which is the number that decides whether reordering
+    # is worth attempting at all. If three packages account for most of the
+    # dependency resolution, the order is worth thinking about; if it is spread
+    # evenly across two hundred, it is not.
+    awk -F'\t' "$NORM"'
+        st == "ok" { d[pkg] = deps; if (deps > 1) { tot += deps - 1; n++ } }
+        END {
+            if (n == 0) { print "  No dependency counts recorded yet (v1 file, or nothing pulled anything in)."; exit }
+            m = 0
+            for (p in d) if (d[p] - 1 > m) m = d[p] - 1
+            printf "  %d packages pulled %d others in between them.\n", n, tot
+            printf "  The largest single pull was %d.\n", m
+            if (tot > 0 && m * 100 / tot >= 40)
+                printf "  \033[33mOne package accounts for %.0f%% of it -- that is the one to move.\033[0m\n", m * 100 / tot
+            else
+                printf "  No single package dominates; reordering is unlikely to pay.\n"
+        }
+    ' "$TIMES"
+    printf '\n'
+}
+
 # Where the time went by section, which is the view that answers "is this
 # stage worth splitting up" rather than "which package was worst".
 groups() {
@@ -15314,6 +15573,7 @@ case "${1:-}" in
               printf '\n  copal-times groups   by section     copal-times csv   for analysis\n\n' ;;
     all)      report all; summary ;;
     groups)   groups; summary ;;
+    order)    order ;;
     total)    summary ;;
     csv)      csv ;;
     --motd)
@@ -15752,7 +16012,11 @@ df -h "$MNT" | tail -n1
 info "Flushing writes (this can take a while)..."
 sync
 # 'eject' on an attached image detaches it, so there is no special case here.
-diskutil eject "/dev/$DISK"
+phase "Eject"
+hint "eject, not just unmount: it takes the volumes down AND releases the"
+hint "device, which for an attached image is what detaches it. The card is"
+hint "safe to pull the moment this returns."
+run diskutil eject "/dev/$DISK"
 
 # An image is finished at this point, and what you need next is the command to
 # boot it -- not two pages about SD card partitions. Print that instead and
