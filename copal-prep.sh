@@ -846,8 +846,8 @@ on_interrupt() {
     if [ -n "${DISK:-}" ] && [ "${ERASED:-0}" = "1" ]; then
         printf '\033[33mNote: /dev/%s was already repartitioned. It is NOT bootable.\033[0m\n' "$DISK" >&2
         printf '\033[33mRe-run this script to finish, or the card will be unusable.\033[0m\n' >&2
-        sync 2>/dev/null || true
-        diskutil unmountDisk "/dev/$DISK" >/dev/null 2>&1 || true
+        run sync || true
+        runq diskutil unmountDisk "/dev/$DISK" || true
     fi
     # An image left attached is worse than one left half-written: the next run
     # refuses to attach it twice, and the reason is not obvious from the file.
@@ -1462,7 +1462,7 @@ else
     echo >&2
     info "External disks currently attached:"
     echo >&2
-    diskutil list external physical >&2
+    run diskutil list external physical >&2
     echo >&2
 
     DISK=""
@@ -1533,7 +1533,7 @@ printf '    Removable  : %s\n'      "$REMOVABLE" >&2
 printf '    Ejectable  : %s\n'      "${EJECTABLE:-(not reported)}" >&2
 [ -n "$MOUNTED" ] && printf '    Volumes    : %s\n' "$MOUNTED" >&2
 echo >&2
-diskutil list "/dev/$DISK" >&2
+run diskutil list "/dev/$DISK" >&2
 echo >&2
 
 # --- soft signals: not fatal, but each one earns a warning -----------------
@@ -1582,7 +1582,7 @@ DISK_FINGERPRINT="${MEDIANAME}|${DISK_BYTES}|$(get "Disk / Partition UUID")"
 if [ "$REFRESH" -eq 1 ]; then
     # Refresh: mount the existing boot partition and leave everything else be.
     MNT="/Volumes/$BOOT_LABEL"
-    diskutil mount "${DISK}s1" >/dev/null 2>&1 || true
+    runq diskutil mount "${DISK}s1" || true
     [ -d "$MNT" ] || die "could not mount ${DISK}s1 at $MNT -- is this a card written by copal-prep.sh?"
     assert_mount_is "$MNT" "$DISK"
     [ -e "$MNT/config.txt" ] && [ -e "$MNT/boot/vmlinuz-rpi" ] \
@@ -1712,7 +1712,7 @@ printf 't 2\n83\nw\ny\nq\n' | runq sudo fdisk -e "/dev/$DISK" \
 # cheaper than a card that boots on one machine and not the next.
 if [ "$PLATFORM" = pc ]; then
     info "Setting partition 1 type to EFI System (0xEF)..."
-    diskutil unmount "${DISK}s1" >/dev/null 2>&1 || true
+    runq diskutil unmount "${DISK}s1" || true
     printf 't 1\nEF\nw\ny\nq\n' | sudo fdisk -e "/dev/$DISK" >/dev/null 2>&1 \
         || warn "could not set the ESP type byte on p1 -- most firmware still boots it"
 fi
@@ -2223,7 +2223,10 @@ stage_rom() {  # <source file> <destination file>
         stored=$(od -An -tx1 -N4 "$src" | tr -d ' \n')
         computed=$(rom_checksum "$src" 4 $((len - 4)))
         if [ "$stored" = "$computed" ]; then
-            dd if="$src" of="$dst" bs="$len" count=1 2>/dev/null || return 1
+            # count=1 of exactly $len bytes: a ROM dump routinely carries
+            # trailing padding or a resource fork, and Mini vMac wants the
+            # image alone. The checksum above proved which length is right.
+            runq dd if="$src" of="$dst" bs="$len" count=1 || return 1
             info "ROM staged: $(rom_identify "$stored") -- checksum $stored verified over $len bytes$(
                 [ "$size" -ne "$len" ] && printf ', %s bytes of padding trimmed' "$((size - len))")"
             info "  from $src"
@@ -2976,6 +2979,44 @@ state_report() {
 # being off, which it is by default.
 INSTALL_TIMES=/var/lib/copal/install-times.tsv
 
+# ------------------------------------------------ the dependency sets ---
+# The timing record counts how many packages each apk call pulled in. That is
+# enough to say WHICH package to suspect and not enough to say whether moving
+# it would help: two packages that each pull forty things may be pulling the
+# same forty, in which case reordering them changes nothing at all.
+#
+# The only way to know is to ask apk what it WOULD do, which it will answer
+# without doing it. `apk add --simulate` resolves the transaction and prints
+# the same "Installing <name>" lines as a real add, so the set of names is
+# available at the same cost as parsing output we already parse.
+#
+# THE COST, stated because it is a real one: this is a second apk invocation
+# per package. Resolution is local -- no downloads -- so it is a fraction of a
+# second each, and across three hundred packages it adds a minute or two to an
+# install measured in hours. Set COPAL_DEPS=0 to skip it; the timings and the
+# counts still work, and only the set analysis goes away.
+INSTALL_DEPS=/var/lib/copal/install-deps.tsv
+COPAL_DEPS="${COPAL_DEPS:-1}"
+
+record_deps() {  # <package as asked for>
+    [ "$COPAL_DEPS" = 1 ] || return 0
+    mkdir -p "$(dirname "$INSTALL_DEPS")" 2>/dev/null || return 0
+    if [ ! -s "$INSTALL_DEPS" ]; then
+        printf '#copal-deps v1\n#pkg\tcount\twould-install\n' >> "$INSTALL_DEPS" 2>/dev/null || true
+    fi
+    # --simulate, not -s: -s is 'size' in some apk versions and the long form
+    # cannot be mistaken for it by a reader either.
+    _sim=$(apk add --simulate "$1" 2>/dev/null \
+           | sed -n 's/^(\([0-9]*\)\/\([0-9]*\)) *Installing \([^ ]*\).*/\3/p' \
+           | tr '\n' ' ' | sed 's/ *$//')
+    # Nothing to say when apk would install nothing -- an already-present
+    # package. Recording an empty set would look like a package with no
+    # dependencies, which is a different and wrong claim.
+    [ -n "$_sim" ] || return 0
+    _n=$(printf '%s' "$_sim" | wc -w | tr -d ' ')
+    printf '%s\t%s\t%s\n' "$1" "$_n" "$_sim" >> "$INSTALL_DEPS" 2>/dev/null || true
+}
+
 # One line per package: when, how long, whether it worked, and how big it was.
 #
 # TAB-SEPARATED AND APPEND-ONLY, so it can be read by sort/awk on a machine
@@ -3178,6 +3219,9 @@ try_add() {
         # 'apk info -e' does not understand the suffix, so the
         # already-installed check has to be made against the bare name.
         _bare=${_p%@*}
+        # Asked BEFORE the install, which is the only time the answer is
+        # interesting: afterwards apk would say it would install nothing.
+        record_deps "$_p"
         _t0=$(date +%s)
         if apk info -e "$_bare" >/dev/null 2>&1; then
             pkg_line "$_idx" "$_tot" "$_bare" cached 0; _ok=1
@@ -15353,6 +15397,7 @@ COPALDEBUG
 set -eu
 
 TIMES=/var/lib/copal/install-times.tsv
+DEPS=/var/lib/copal/install-deps.tsv
 MOTD=/etc/motd
 
 usage() {
@@ -15363,6 +15408,8 @@ copal-times -- how long each package took to install.
   copal-times all         every package, slowest first
   copal-times groups      where the time went, by section
   copal-times order       what pulled the most in, and where it sat
+  copal-times shared      prerequisites more than one package needed
+  copal-times deps PKG    what one package would drag in
   copal-times total       one line: packages, failures, wall-clock
   copal-times csv         the whole record as CSV, for analysis elsewhere
   copal-times --motd      regenerate the login summary (needs root)
@@ -15527,6 +15574,89 @@ order() {
     printf '\n'
 }
 
+# SHARED -- the prerequisites more than one package needed.
+#
+# order() can only point at suspects, because a count of dependencies cannot
+# tell you whether two packages pulled the SAME ones. This can: it reads the
+# sets apk itself resolved before each install and finds the overlap.
+#
+# What it is for. If forty packages each needed the same six libraries, those
+# six are a base that could be installed once, deliberately, at the front --
+# and then every timing after that is the honest cost of the package rather
+# than a lottery over which one happened to be asked for first. That is the
+# "fewest prerequisites" question, and it is answerable only from the sets.
+shared() {
+    [ -s "$DEPS" ] || {
+        echo "No dependency sets recorded ($DEPS)." >&2
+        echo "They are written during an install; COPAL_DEPS=0 turns that off." >&2
+        exit 1
+    }
+    printf '\n  \033[1mPrerequisites wanted by more than one package\033[0m\n'
+    printf '  %-30s %8s\n' DEPENDENCY 'WANTED BY'
+    printf '  %s\n' '----------------------------------------------------------------'
+    # Field 3 onward is the set. A dependency is only interesting here if two
+    # or more DIFFERENT requested packages needed it -- a package appearing in
+    # its own set is itself, not a shared prerequisite.
+    awk -F'\t' '
+        /^#/ { next }
+        {
+            n = split($3, a, " ")
+            for (i = 1; i <= n; i++) {
+                if (a[i] == $1) continue
+                if (!seen[$1 SUBSEP a[i]]++) want[a[i]]++
+            }
+        }
+        END { for (d in want) if (want[d] > 1) printf "%d\t%s\n", want[d], d }
+    ' "$DEPS" | sort -rn | head -20 \
+      | while IFS="$(printf '\t')" read -r _n _dep; do
+            printf '  %-30.30s %8s\n' "$_dep" "$_n"
+        done
+    printf '\n'
+    awk -F'\t' '
+        /^#/ { next }
+        {
+            pkgs++
+            n = split($3, a, " ")
+            for (i = 1; i <= n; i++) { if (a[i] != $1) { all[a[i]]++; total++ } }
+        }
+        END {
+            if (pkgs == 0) { print "  Nothing recorded."; exit }
+            uniq = 0; sharedn = 0
+            for (d in all) { uniq++; if (all[d] > 1) sharedn++ }
+            printf "  %d packages needed %d prerequisite installs between them,\n", pkgs, total
+            printf "  but only %d DISTINCT packages -- %d of which more than one wanted.\n", uniq, sharedn
+            if (total > 0)
+                printf "  Installing those %d first would take %d resolutions down to %d.\n", sharedn, total, uniq
+        }
+    ' "$DEPS"
+    printf '\n'
+    hint_line="  copal-times deps PKG   what one package would drag in"
+    printf '\033[2m%s\033[0m\n\n' "$hint_line"
+}
+
+# What one package would bring with it, straight from the record.
+deps_of() {  # <package>
+    [ -s "$DEPS" ] || { echo "No dependency sets recorded ($DEPS)." >&2; exit 1; }
+    [ -n "${1:-}" ] || { echo "usage: copal-times deps PKG" >&2; exit 2; }
+    awk -F'\t' -v want="$1" '
+        /^#/ { next }
+        $1 == want || $1 ~ ("^" want "@") {
+            # The stored count includes the package itself, because that is
+            # what apk installs. What is listed here is what came WITH it, so
+            # the two must not use the same number -- saying "5" above a list
+            # of 4 is the kind of small lie that makes a report untrustworthy.
+            n = split($3, a, " ")
+            others = 0
+            for (i = 1; i <= n; i++) if (a[i] != $1) others++
+            printf "\n  %s brought %d other package(s) with it:\n\n", $1, others
+            for (i = 1; i <= n; i++) if (a[i] != $1) printf "    %s\n", a[i]
+            printf "\n"
+            found = 1
+        }
+        END { if (!found) printf "\n  %s is not in the record.\n\n", want }
+    ' "$DEPS"
+}
+
 # Where the time went by section, which is the view that answers "is this
 # stage worth splitting up" rather than "which package was worst".
 groups() {
@@ -15574,6 +15704,8 @@ case "${1:-}" in
     all)      report all; summary ;;
     groups)   groups; summary ;;
     order)    order ;;
+    shared)   shared ;;
+    deps)     deps_of "${2:-}" ;;
     total)    summary ;;
     csv)      csv ;;
     --motd)
