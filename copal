@@ -488,10 +488,27 @@ img_for() { printf '%s/copal-%s.img' "$BUILDDIR" "$1"; }
 # unbounded or the build dies on EOF at the first step gate, and an unbounded
 # feed still writing when the child exits makes script(1) report a write error
 # that has nothing to do with whether the build worked.
+# Debug logging, threaded from any entry point down to copal-prep.sh. Empty
+# means the default -- off -- and that is deliberately what you get unless you
+# say otherwise, on every path through this script.
+DEBUG_ARG=""
+
+# Consume --debug / --debug=DURATION wherever it appears, and say whether it
+# did. Written once because four entry points accept it and four copies of an
+# argument parser is four places for them to disagree about what --debug means.
+take_debug_arg() {  # <arg>
+    case "$1" in
+        --debug)   DEBUG_ARG="--debug"; return 0 ;;
+        --debug=*) DEBUG_ARG="$1";      return 0 ;;
+    esac
+    return 1
+}
+
 build_unattended() {  # <board> <image path> <log>
     _b="$1"; _out="$2"; _log="$3"
     mkdir -p "$(dirname "$_log")" "$(dirname "$_out")"
-    yes '' | script -q "$_log" env MODEL="$_b" "$PREP" --fresh --image "$_out" \
+    # shellcheck disable=SC2086
+    yes '' | script -q "$_log" env MODEL="$_b" "$PREP" --fresh $DEBUG_ARG --image "$_out" \
         >/dev/null 2>&1 || true
     grep -q 'is written and detached' "$_log" && return 0
     say "${R}error:${Z} $_b did not finish. Tail of $_log:"
@@ -532,6 +549,7 @@ cmd_build() {
             --out=*) _out="${1#--out=}"; shift ;;
             --fresh) _fresh="--fresh"; shift ;;
             --auto)  _auto=1; shift ;;
+            --debug|--debug=*) take_debug_arg "$1"; shift ;;
             *) say "${R}error:${Z} unknown option '$1' for build"; exit 2 ;;
         esac
     done
@@ -541,7 +559,7 @@ cmd_build() {
     fi
     mkdir -p "$(dirname "$_out")"
     # shellcheck disable=SC2086
-    MODEL="$_b" exec "$PREP" $_fresh --image "$_out"
+    MODEL="$_b" exec "$PREP" $_fresh $DEBUG_ARG --image "$_out"
 }
 
 # Every board, one after another. SERIAL, and not as an oversight.
@@ -553,7 +571,12 @@ cmd_build() {
 # does not go faster; it stops. There is nothing to fix here: the label is what
 # makes a card recognisable, and one build at a time is the price.
 cmd_build_all() {
+    while [ $# -gt 0 ]; do
+        take_debug_arg "$1" || { say "${R}error:${Z} unknown option '$1' for build all"; exit 2; }
+        shift
+    done
     say "\n${C}==>${Z} Building every board. ${Y}Serial -- one at a time, by necessity.${Z}"
+    [ -n "$DEBUG_ARG" ] && say "${Y}    Debug logging ON in every image ($DEBUG_ARG).${Z}"
     say "${D}    Boot partitions all share a label, so two builds cannot mount at once.${Z}\n"
     cmd_cache all || return 1
     _failed=''; _built=0
@@ -599,7 +622,7 @@ cmd_vm_all() {
 }
 
 cmd_all() {
-    cmd_build_all || say "${Y}Some boards failed; continuing to the VMs.${Z}"
+    cmd_build_all "$@" || say "${Y}Some boards failed; continuing to the VMs.${Z}"
     say "\n${C}==>${Z} Registering the UTM machines\n"
     cmd_vm_all
     say "\n${G}Done.${Z} ${D}copal vm start --target aarch64${Z}\n"
@@ -616,7 +639,10 @@ usage() {
     say "  copal build ${C}BOARD${Z} --out ${C}P${Z}       write it somewhere else"
     say "  copal build ${C}BOARD${Z} --fresh       delete it first, build from nothing"
     say "  copal build ${C}BOARD${Z} --auto        unattended; answers the step gates"
+    say "  copal build ${C}BOARD${Z} --debug       log collection on from first boot"
+    say "  copal build ${C}BOARD${Z} --debug=1d    the same, expiring after a day"
     say "  copal build all                 every board, serially"
+    say "  copal build all --debug         every board, all with logging on"
     say "  copal card ${C}BOARD${Z}                a physical card ${D}(asks twice)${Z}"
     say ""
     say "${B}  Payloads${Z}"

@@ -66,7 +66,8 @@ export MEM CPUS BUILDDIR CACHEDIR
 model_of = $(patsubst pizero%,zero%,$(1))
 
 .DEFAULT_GOAL := help
-.PHONY: help menu flow targets boards configure require-tools vm graphical check \
+.PHONY: alldebug build-all-debug imagedebug freshdebug \
+	help menu flow targets boards configure require-tools vm graphical check \
         fresh auto image refresh utm utm-x86 lint space clean distclean \
         all cache build-all
 
@@ -115,6 +116,9 @@ help:
 	@printf '  make cache      download every architecture'"'"'s payload, build nothing\n'
 	@printf '  make all        cache, build all %s boards, register both UTM machines\n' "$$(./copal targets | wc -l | tr -d ' ')"
 	@printf '                  \033[33mSerial by necessity -- make -j cannot help here.\033[0m\n'
+	@printf '  make alldebug   the same, with the log collection on in every image\n'
+	@printf '                  \033[2mDEBUG=1d by default; make alldebug DEBUG=7d, or DEBUG=on for no deadline\033[0m\n'
+	@printf '  make imagedebug one board (MODEL=%s), logging on   \033[2malso: make freshdebug\033[0m\n' '$(MODEL)'
 	@printf '\n'
 	@printf '\033[1m  Housekeeping\033[0m\n'
 	@printf '  make lint       sh -n on copal-prep.sh and on the copal-init.sh it generates\n'
@@ -248,8 +252,15 @@ image: $(IMG)
 $(IMG): | require-tools $(BUILDDIR)
 	MODEL=$(MODEL) $(PREP) --image $(IMG)
 
+# One board, with logging on. The single-image counterpart of `make alldebug`.
+imagedebug: | require-tools $(BUILDDIR)
+	MODEL=$(MODEL) $(PREP) --debug=$(DEBUG) --image $(IMG)
+
 fresh: | require-tools $(BUILDDIR)
 	MODEL=$(MODEL) $(PREP) --fresh --image $(IMG)
+
+freshdebug: | require-tools $(BUILDDIR)
+	MODEL=$(MODEL) $(PREP) --fresh --debug=$(DEBUG) --image $(IMG)
 	@printf '\n\033[36m==>\033[0m Built. Boot it with: make vm   (or: make check)\n'
 
 # Unattended. copal-prep.sh gates each step on a read from /dev/tty, so this
@@ -335,10 +346,31 @@ utm-x86:
 # the mount point is not its own. `make -j all` would not be faster; it would
 # stop partway with a confusing error, so parallelism is disabled here rather
 # than diagnosed later.
-.NOTPARALLEL: all cache build-all
+.NOTPARALLEL: all alldebug cache build-all build-all-debug
 
 all:
 	@./copal all
+
+# The same thing with the log collection switched on in every image.
+#
+# DEBUG is a duration, not a boolean, and it defaults to one day rather than
+# "for ever". A card built for debugging is usually built to answer one
+# question, and logging that has to be remembered to be switched off is
+# logging that stays on for the life of the machine. Override it when the
+# question needs longer:
+#
+#     make alldebug DEBUG=7d      a week
+#     make alldebug DEBUG=on      no deadline, switch it off by hand
+#
+# Everything lands in /var/log/copal on the built machine, readable over ssh.
+# `doas copal-debug off` turns it off early; `copal-debug bundle` packs it up.
+DEBUG ?= 1d
+
+alldebug:
+	@./copal all --debug=$(DEBUG)
+
+build-all-debug:
+	@./copal build all --debug=$(DEBUG)
 
 cache:
 	@./copal cache all
