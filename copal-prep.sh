@@ -846,8 +846,8 @@ on_interrupt() {
     if [ -n "${DISK:-}" ] && [ "${ERASED:-0}" = "1" ]; then
         printf '\033[33mNote: /dev/%s was already repartitioned. It is NOT bootable.\033[0m\n' "$DISK" >&2
         printf '\033[33mRe-run this script to finish, or the card will be unusable.\033[0m\n' >&2
-        run sync || true
-        runq diskutil unmountDisk "/dev/$DISK" || true
+        sync 2>/dev/null || true
+        diskutil unmountDisk "/dev/$DISK" >/dev/null 2>&1 || true
     fi
     # An image left attached is worse than one left half-written: the next run
     # refuses to attach it twice, and the reason is not obvious from the file.
@@ -865,22 +865,13 @@ on_interrupt() {
 release_image() {
     [ -n "${IMAGE_DEV:-}" ] || return 0
     [ -e "$IMAGE_DEV" ] || { IMAGE_DEV=""; return 0; }
-    # THE ORDER MATTERS and is the reason this is three commands rather than
-    # one: sync flushes what the copy left in the buffer cache, unmountDisk
-    # takes every volume on the device down so nothing holds it open, and only
-    # then can detach succeed. Detaching a device with a mounted volume on it
-    # is what leaves a phantom /dev/diskN that the next run trips over.
-    hint "sync, then unmount every volume, then detach -- in that order."
-    run sync || true
-    runq diskutil unmountDisk "$IMAGE_DEV" || true
-    if ! runq hdiutil detach "$IMAGE_DEV"; then
-        # -force is a last resort, not the default: it detaches whether or not
-        # anything still holds the device, which is the right thing when the
-        # alternative is leaving it attached forever, and the wrong thing to
-        # reach for first.
-        hint "Plain detach refused -- something still holds it. Forcing."
-        runq hdiutil detach -force "$IMAGE_DEV" || true
-    fi
+    # sync, then unmount every volume, then detach -- in that order. Detaching
+    # a device that still has a mounted volume on it is what leaves a phantom
+    # /dev/diskN for the next run to trip over.
+    sync 2>/dev/null || true
+    diskutil unmountDisk "$IMAGE_DEV" >/dev/null 2>&1 || true
+    hdiutil detach "$IMAGE_DEV" >/dev/null 2>&1 \
+        || hdiutil detach -force "$IMAGE_DEV" >/dev/null 2>&1 || true
     IMAGE_DEV=""
 }
 
@@ -1407,12 +1398,14 @@ attach_image() {
         info "Image   : $IMAGE_PATH (exists, $(du -h "$IMAGE_PATH" | awk '{print $1}') on disk -- will be repartitioned)"
     else
         seek_mb=$(( IMAGE_BYTES / 1024 / 1024 ))
-        hint "count=0 seek=$seek_mb writes NOTHING and moves the end of the file"
-        hint "to ${IMAGE_SIZE}. The result is sparse: it costs only what is"
-        hint "actually written later, so a 64g image is a few hundred MB on"
-        hint "disk. mkfile would allocate the whole size up front, and spend"
-        hint "minutes doing it."
-        run dd if=/dev/zero of="$IMAGE_PATH" bs=1m count=0 seek="$seek_mb" \
+        # Sparse: seek past the end and write nothing, so a 16g image costs
+        # only what is actually written to it. mkfile without -n would take
+        # the full size up front, and minutes doing it.
+        #
+        # NOT wrapped in run/runq, deliberately and permanently: dd writes to
+        # a device, and nothing that writes to a device gets an extra layer
+        # between it and the shell for the sake of a prettier log.
+        dd if=/dev/zero of="$IMAGE_PATH" bs=1m count=0 seek="$seek_mb" 2>/dev/null \
             || die "could not create $IMAGE_PATH"
         info "Image   : $IMAGE_PATH (created sparse, ${IMAGE_SIZE})"
     fi
@@ -1420,13 +1413,6 @@ attach_image() {
     # CRawDiskImage: treat the file as a bare sector image with no header, which
     # is what a card is and what QEMU expects back. Without it hdiutil looks for
     # a UDIF or DMG structure and declines a file that has neither.
-    hint "CRawDiskImage: treat the file as bare sectors with no header, which"
-    hint "is what a card is and what QEMU expects back. Without it hdiutil"
-    hint "looks for a UDIF/DMG structure and declines a file that has neither."
-    hint "-nomount: attach the device but do not let macOS mount anything on"
-    hint "it yet -- the partition table is about to be rewritten."
-    printf '    \033[32m$\033[0m \033[1m%s\033[0m\n' \
-        "hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount $IMAGE_PATH" >&2
     IMAGE_DEV=$(hdiutil attach -imagekey diskimage-class=CRawDiskImage -nomount "$IMAGE_PATH" \
                 | awk 'NR==1 { print $1 }') \
         || die "hdiutil could not attach $IMAGE_PATH"
@@ -1462,7 +1448,7 @@ else
     echo >&2
     info "External disks currently attached:"
     echo >&2
-    run diskutil list external physical >&2
+    diskutil list external physical >&2
     echo >&2
 
     DISK=""
@@ -1533,7 +1519,7 @@ printf '    Removable  : %s\n'      "$REMOVABLE" >&2
 printf '    Ejectable  : %s\n'      "${EJECTABLE:-(not reported)}" >&2
 [ -n "$MOUNTED" ] && printf '    Volumes    : %s\n' "$MOUNTED" >&2
 echo >&2
-run diskutil list "/dev/$DISK" >&2
+diskutil list "/dev/$DISK" >&2
 echo >&2
 
 # --- soft signals: not fatal, but each one earns a warning -----------------
@@ -1582,7 +1568,7 @@ DISK_FINGERPRINT="${MEDIANAME}|${DISK_BYTES}|$(get "Disk / Partition UUID")"
 if [ "$REFRESH" -eq 1 ]; then
     # Refresh: mount the existing boot partition and leave everything else be.
     MNT="/Volumes/$BOOT_LABEL"
-    runq diskutil mount "${DISK}s1" || true
+    diskutil mount "${DISK}s1" >/dev/null 2>&1 || true
     [ -d "$MNT" ] || die "could not mount ${DISK}s1 at $MNT -- is this a card written by copal-prep.sh?"
     assert_mount_is "$MNT" "$DISK"
     [ -e "$MNT/config.txt" ] && [ -e "$MNT/boot/vmlinuz-rpi" ] \
@@ -1671,22 +1657,15 @@ info "Re-checked /dev/$DISK: still the device you selected."
 ERASED=1
 # MBRFormat: the Pi firmware reads an MBR/FDisk partition table, not GPT.
 # MS-DOS FAT32 boot partition, remainder left as free space for ext4 later.
-phase "Partition"
-info "Partitioning /dev/$DISK (MBR: FAT32 ${BOOT_SIZE} '${BOOT_LABEL}' + ${ROOT_SIZE_LABEL} '${ROOT_LABEL}')"
-hint "MBRFormat, not GPT: the Pi firmware reads an MBR/FDisk table."
-hint "Everything on /dev/$DISK is destroyed by the next command."
-hint "Unmount first -- diskutil refuses to partition a mounted disk, and"
-hint "macOS mounts a FAT volume the moment it appears."
-runq diskutil unmountDisk "/dev/$DISK" || true
+info "Partitioning /dev/$DISK (MBR: FAT32 ${BOOT_SIZE} '${BOOT_LABEL}' + ${ROOT_SIZE_LABEL} '${ROOT_LABEL}')..."
+diskutil unmountDisk "/dev/$DISK" >/dev/null 2>&1 || true
 if [ "$ROOT_SIZE" = "R" ]; then
     # No trailing "Free Space" entry: p2 takes everything left.
-    hint "p2 gets 'R' -- the remainder of the card, so nothing is stranded."
-    run diskutil partitionDisk "/dev/$DISK" MBRFormat \
+    diskutil partitionDisk "/dev/$DISK" MBRFormat \
         MS-DOS "$BOOT_LABEL" "$BOOT_SIZE" \
         MS-DOS "$ROOT_LABEL" R
 else
-    hint "p2 is fixed at $ROOT_SIZE, and the remainder is left unformatted."
-    run diskutil partitionDisk "/dev/$DISK" MBRFormat \
+    diskutil partitionDisk "/dev/$DISK" MBRFormat \
         MS-DOS "$BOOT_LABEL" "$BOOT_SIZE" \
         MS-DOS "$ROOT_LABEL" "$ROOT_SIZE" \
         "Free Space" %noformat% R
@@ -1695,14 +1674,9 @@ fi
 # p2 is created as FAT only because macOS has no ext4 support; the filesystem
 # is replaced on the Pi. Set the MBR type byte to 0x83 (Linux) so the partition
 # is not mistaken for a FAT volume, and unmount it so macOS stops touching it.
-info "Setting partition 2 type to Linux (0x83)"
-hint "diskutil made p2 FAT because macOS cannot make ext4. The type BYTE is"
-hint "corrected here so macOS stops offering to mount it and Linux reads it"
-hint "as a Linux partition. The filesystem itself is replaced on the target."
-hint "fdisk -e is interactive, so the answers are piped: t=type, 2=partition,"
-hint "83=Linux, w=write, y=confirm, q=quit."
-runq diskutil unmount "${DISK}s2" || true
-printf 't 2\n83\nw\ny\nq\n' | runq sudo fdisk -e "/dev/$DISK" \
+info "Setting partition 2 type to Linux (0x83)..."
+diskutil unmount "${DISK}s2" >/dev/null 2>&1 || true
+printf 't 2\n83\nw\ny\nq\n' | sudo fdisk -e "/dev/$DISK" >/dev/null 2>&1 \
     || warn "could not set the type byte on p2 (harmless; mkfs.ext4 overwrites it anyway)"
 
 # On a PC, partition 1 has to be an EFI System Partition: type 0xEF. The Pi
@@ -1712,7 +1686,7 @@ printf 't 2\n83\nw\ny\nq\n' | runq sudo fdisk -e "/dev/$DISK" \
 # cheaper than a card that boots on one machine and not the next.
 if [ "$PLATFORM" = pc ]; then
     info "Setting partition 1 type to EFI System (0xEF)..."
-    runq diskutil unmount "${DISK}s1" || true
+    diskutil unmount "${DISK}s1" >/dev/null 2>&1 || true
     printf 't 1\nEF\nw\ny\nq\n' | sudo fdisk -e "/dev/$DISK" >/dev/null 2>&1 \
         || warn "could not set the ESP type byte on p1 -- most firmware still boots it"
 fi
@@ -1730,15 +1704,9 @@ info "Marking partition 1 bootable..."
 printf 'f 1\nw\ny\nq\n' | sudo fdisk -e "/dev/$DISK" >/dev/null 2>&1 \
     || warn "could not set the bootable flag (usually harmless; continuing)"
 
-phase "Mount"
-# macOS needs a moment after a format before the volume can be mounted by
-# name; without this the mount below fails on a device that is about to work.
-hint "A two-second pause: macOS re-scans a freshly formatted device"
-hint "asynchronously, and mounting it too early fails on a disk that is"
-hint "perfectly good a moment later."
 sleep 2
 MNT="/Volumes/$BOOT_LABEL"
-runq diskutil mount "${DISK}s1" || true
+diskutil mount "${DISK}s1" >/dev/null 2>&1 || true
 [ -d "$MNT" ] || die "expected $MNT to be mounted after formatting; check 'diskutil list'"
 assert_mount_is "$MNT" "$DISK"
 
@@ -1753,18 +1721,10 @@ step "Copy the Alpine payload onto ${BOOT_LABEL}" \
     "" \
     "May take several minutes on a slow card."
 
-phase "Copy payload"
-info "Copying payload to $MNT"
-hint "cp -Rp of FILES, not dd of an image. Writing an Alpine ISO to the card"
-hint "as a block image is the original boot-rainbow failure this whole"
-hint "procedure exists to avoid: the ISO carries its own filesystem and"
-hint "partition layout, and the firmware cannot read either."
-hint "-p preserves modes and times; 'cd \$SRC && cp -Rp .' copies the"
-hint "CONTENTS rather than the directory itself."
-hint "COPYFILE_DISABLE=1 suppresses macOS ._AppleDouble sidecar files."
-hint "$(( SRC_BYTES / 1024 / 1024 )) MiB to write -- minutes on a slow card."
+# COPYFILE_DISABLE stops macOS writing ._AppleDouble sidecar files.
+info "Copying payload to $MNT ..."
 export COPYFILE_DISABLE=1
-run sh -c "cd '$SRC' && cp -Rp . '$MNT/'"
+(cd "$SRC" && cp -Rp . "$MNT/")
 
 fi   # end of the destructive block skipped by --refresh
 
@@ -1884,15 +1844,24 @@ APKCACHEOPTS="none"
 # partition search to find.
 #
 # COPAL_ROOT_PW_HASH is the SHA-512 crypt hash of the root password, the same
-# string /etc/shadow holds. Stage 1 applies it with `chpasswd -e` and skips the
-# interactive prompt entirely. Empty means nobody ran `make answers`, and the
-# install asks for a password exactly as it always has.
+# string /etc/shadow holds. Stage 1 applies it with "chpasswd -e" and skips
+# the interactive prompt entirely. Empty means nobody ran "make answers", and
+# the install asks for a password exactly as it always has.
 #
-# SINGLE quotes. setup-alpine SOURCES this file, and a crypt hash begins
-# "$6$rounds=..." -- in double quotes the shell expands $6 as a positional
-# parameter, leaving "$rounds=..." on the card and an account nobody can log
-# into. There is no error when that happens, which is what makes it worth a
-# comment this long.
+# SINGLE quotes, because setup-alpine SOURCES this file and a crypt hash
+# starts with a dollar sign and a digit. In double quotes the shell would take
+# that for a positional parameter and expand it away, leaving a truncated hash
+# on the card and an account nobody can log into, with no error to say so.
+#
+# The dollar signs in that sentence are spelled out rather than written,
+# because THIS heredoc is unquoted too: every $ in these lines is expanded by
+# the shell writing the card. Writing the example literally is what broke
+# every board in the 2026-08-21 build -- the comment warning about the
+# expansion was itself expanded. Backticks are the same trap in the same
+# breath: this heredoc runs them, so a comment mentioning a command in
+# backticks EXECUTES it -- which is how a build came to run "make answers"
+# three hundred times and rewrite the answers file under itself. Quotes here,
+# never backticks.
 COPAL_ROOT_PW_HASH='${CFG_ROOT_PW_HASH}'
 # 1 = take every default that answers.txt can supply without stopping to ask.
 # Whether sshd may accept a password at all. Set from the Mac, by whoever
@@ -2226,7 +2195,8 @@ stage_rom() {  # <source file> <destination file>
             # count=1 of exactly $len bytes: a ROM dump routinely carries
             # trailing padding or a resource fork, and Mini vMac wants the
             # image alone. The checksum above proved which length is right.
-            runq dd if="$src" of="$dst" bs="$len" count=1 || return 1
+            # Not traced -- see the note on the other dd.
+            dd if="$src" of="$dst" bs="$len" count=1 2>/dev/null || return 1
             info "ROM staged: $(rom_identify "$stored") -- checksum $stored verified over $len bytes$(
                 [ "$size" -ne "$len" ] && printf ', %s bytes of padding trimmed' "$((size - len))")"
             info "  from $src"
@@ -16144,11 +16114,7 @@ df -h "$MNT" | tail -n1
 info "Flushing writes (this can take a while)..."
 sync
 # 'eject' on an attached image detaches it, so there is no special case here.
-phase "Eject"
-hint "eject, not just unmount: it takes the volumes down AND releases the"
-hint "device, which for an attached image is what detaches it. The card is"
-hint "safe to pull the moment this returns."
-run diskutil eject "/dev/$DISK"
+diskutil eject "/dev/$DISK"
 
 # An image is finished at this point, and what you need next is the command to
 # boot it -- not two pages about SD card partitions. Print that instead and
