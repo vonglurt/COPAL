@@ -3977,6 +3977,7 @@ stage_base_config() {
     # Before the commit, so the fstab line and the module list are inside the
     # apkovl. On a diskless system a change made after it is a change lost.
     configure_9p_share
+    configure_power_button
 
     # Before the commit, and before anything relies on persistence.
     lbu_fix_media
@@ -4089,6 +4090,94 @@ configure_9p_share() {
     if writing back is refused, write as root, or work on a copy in your
     home directory.
 SHAREMSG
+}
+
+# ------------------------------------------------ the power button ---
+#
+# THE MISSING PIECE, and it is not obvious from inside the machine: pressing a
+# power button, or asking UTM for "Request Power Down", does nothing at all on
+# a stock Alpine guest -- and it does nothing SILENTLY, which reads as a hung
+# VM rather than as a message nobody was listening for.
+#
+# What actually happens is a chain, and the last link is missing:
+#
+#   UTM "Request Power Down"  ->  QEMU system_powerdown  ->  ACPI power button
+#   event  ->  the kernel raises it on /proc/acpi's netlink socket  ->  ...and
+#   there it stops, because nothing is subscribed.
+#
+# A physical power button on a PC, and the Pi's own if it has one wired, arrive
+# by exactly the same path. So one daemon fixes the VM case and the hardware
+# case together: acpid is what subscribes to that socket, and a handler script
+# is what turns the event into a shutdown.
+#
+# THE KEYBOARD POWER KEY IS A DIFFERENT THING and needs its own answer. A USB
+# keyboard's power key is an input event (KEY_POWER), not an ACPI one, and
+# under X it never reaches acpid at all -- X grabs the keyboard. That is why
+# the i3 config also binds XF86PowerOff. Both routes end at copal-halt.
+#
+# -y, deliberately. acpid runs the handler as root with no terminal and no
+# DISPLAY, so there is nobody to ask; and pressing the power button IS the
+# answer to "are you sure". Anyone who wants a confirmation instead can point
+# the handler at copal-halt without -y and get the nagbar, but a dialog nobody
+# is sitting in front of is worse than none.
+configure_power_button() {
+    say "The power button, and UTM's Request Power Down"
+
+    if ! command -v acpid >/dev/null 2>&1; then
+        add_optional acpid || {
+            warn "acpid is not available -- the power button will do nothing"
+            note "the machine can still be shut down with copal-halt"
+            return 0
+        }
+    fi
+    command -v acpid >/dev/null 2>&1 || return 0
+
+    mkdir -p /etc/acpi/events
+
+    # The event line is a regular expression matched against the whole event
+    # string, which arrives looking like one of:
+    #     button/power PBTN 00000080 00000000
+    #     button/power PWRF 00000080 00000000
+    #     button/power LNXPWRBN:00 00000080 00000001
+    # The name in the middle differs between QEMU's x86 machine, its aarch64
+    # 'virt' machine and real hardware, so it is not matched on.
+    cat > /etc/acpi/events/copal-powerbtn <<'ACPIEVENT'
+# Written by Copal. The power button, physically or from the hypervisor.
+event=button/power.*
+action=/etc/acpi/copal-power.sh %e
+ACPIEVENT
+
+    cat > /etc/acpi/copal-power.sh <<'ACPIHANDLER'
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 paulr@sdf.org -- part of Copal Linux.
+# Run by acpid when the power button is pressed, or when the hypervisor asks
+# the guest to shut down. Runs as root, with no terminal and no DISPLAY.
+#
+# $1 is the raw event, kept for the log: which of PBTN/PWRF/LNXPWRBN appears
+# is the quickest way to tell a real button from an emulated one.
+logger -t copal-power "power button: ${1:-unknown} -- shutting down"
+exec /usr/local/bin/copal-halt -y poweroff
+ACPIHANDLER
+    chmod 0755 /etc/acpi/copal-power.sh
+    note "/etc/acpi/events/copal-powerbtn -> copal-power.sh -> copal-halt"
+
+    rc-update add acpid default >/dev/null 2>&1 || true
+    rc-service acpid restart >/dev/null 2>&1 || rc-service acpid start >/dev/null 2>&1 || true
+    if rc-service acpid status >/dev/null 2>&1; then
+        note "acpid is running and starts at boot"
+    else
+        warn "acpid did not start -- 'rc-service acpid start' to see why"
+    fi
+
+    cat <<'PWRMSG'
+
+    UTM's "Request Power Down" now shuts this machine down cleanly, and so
+    does a physical power button. Both go through copal-halt, so the card is
+    synced first. Holding the power button, or UTM's "Stop", still cuts the
+    power outright -- that is the hypervisor pulling the plug and nothing in
+    here can soften it.
+PWRMSG
 }
 
 # ------------------------------------------- stage 2: ext4 p2 + apk cache ---
@@ -5073,6 +5162,11 @@ bindsym $mod+Shift+e exec "i3-nagbar -t warning -m 'Exit i3?' -B 'Yes' 'i3-msg e
 # asked to quit rather than killed, syncs, and powers down. Super+Shift+E above
 # only leaves i3, which is the step people mistake for a shutdown.
 bindsym $mod+Shift+p exec copal-halt
+# The keyboard's power key. A USB keyboard sends KEY_POWER as an INPUT event,
+# not an ACPI one, and X grabs the keyboard -- so acpid never sees this one and
+# the binding is the only thing that catches it. The ACPI power button, and
+# UTM's Request Power Down, are handled by acpid instead and need nothing here.
+bindsym XF86PowerOff exec copal-halt
 bindsym $mod+Shift+Delete exec copal-halt reboot
 
 # focus / move, arrows and hjkl both
