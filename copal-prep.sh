@@ -293,7 +293,13 @@ if [ -f "$COPAL_ANSWERS" ]; then
     CFG_HOSTNAME="${CFG_HOSTNAME:-${COPAL_HOSTNAME:-}}"
     CFG_TIMEZONE="${CFG_TIMEZONE:-${COPAL_TIMEZONE:-}}"
     CFG_KEYMAP="${CFG_KEYMAP:-${COPAL_KEYMAP:-}}"
+    # The key named in answers.txt, unless the environment named one. Set
+    # before the CFG_SSHKEY block below, whose ~/.ssh search is the fallback
+    # for a build with no answers file rather than the other way round.
+    [ -n "${COPAL_SSH_KEY:-}" ] && CFG_SSHKEY="${CFG_SSHKEY:-$COPAL_SSH_KEY}"
 fi
+# yes | no | empty. Empty leaves the guest deciding as it always has.
+CFG_SSH_PASSWORD_LOGIN="${CFG_SSH_PASSWORD_LOGIN:-${COPAL_SSH_PASSWORD_LOGIN:-}}"
 CFG_ROOT_PW_HASH="${CFG_ROOT_PW_HASH:-${COPAL_ROOT_PW_HASH:-}}"
 CFG_AUTO_ANSWERS="${CFG_AUTO_ANSWERS:-${COPAL_AUTO:-0}}"
 
@@ -1657,6 +1663,11 @@ APKCACHEOPTS="none"
 # comment this long.
 COPAL_ROOT_PW_HASH='${CFG_ROOT_PW_HASH}'
 # 1 = take every default that answers.txt can supply without stopping to ask.
+# Whether sshd may accept a password at all. Set from the Mac, by whoever
+# chose the password: a build that took the default 'hunter2' says 'no' here,
+# because a password written down in the repository must not also be a network
+# login. Empty leaves the guest to decide as it always did.
+COPAL_SSH_PASSWORD_LOGIN='${CFG_SSH_PASSWORD_LOGIN}'
 COPAL_AUTO='${CFG_AUTO_ANSWERS}'
 COPAL_USER='${CFG_USER}'
 ANSWERS
@@ -4218,6 +4229,24 @@ answers_pw_hash() {
         *) warn "COPAL_ROOT_PW_HASH in answers.txt is not a crypt hash -- ignoring it" >&2
            note "Re-run 'make answers' on the Mac; do not edit that line by hand." >&2
            return 1 ;;
+    esac
+}
+
+# yes | no | empty. Empty means answers.txt said nothing and the existing
+# behaviour stands -- offer the choice, and never disable password login
+# without a key sshd will actually honour.
+#
+# A 'no' here DOES override that guard, and deliberately. It is set when the
+# build used the default password, and "nobody can reach this over the
+# network" is then the point rather than an accident. The console is
+# unaffected: this is a VM with a window, or a board with a serial line.
+answers_ssh_password() {
+    [ -f "$ANSWERS" ] || return 1
+    _s=$(sed -n "s/^COPAL_SSH_PASSWORD_LOGIN=['\"]\{0,1\}//p" "$ANSWERS" \
+            | sed "s/['\"]\{0,1\}[[:space:]]*\$//" | head -1)
+    case "$_s" in
+        yes|no) printf '%s\n' "$_s" ;;
+        *) return 1 ;;
     esac
 }
 
@@ -7993,7 +8022,25 @@ MSG
     # asks whether the file exists, the other whether sshd will accept it. The
     # first is what this used to check, and it disabled password login on a key
     # the daemon then refused -- see ssh_key_usable for the lockout that made.
-    if ssh_key_usable; then
+    # answers.txt first, when it has an opinion: this was decided on the Mac,
+    # by the person who chose the password, and asking again here would let an
+    # unattended install answer it differently from how they meant.
+    if _sshpw=$(answers_ssh_password); then
+        if [ "$_sshpw" = no ]; then
+            note "answers.txt: password login over SSH is to be OFF."
+            ssh_key_usable || {
+                warn "there is no key sshd will accept, so SSH will refuse EVERY"
+                warn "login after this. That is what answers.txt asked for --"
+                warn "it is what stops a known password being a network login."
+                note "The console still works. To undo it from there:"
+                note "    doas copal-ssh password on"
+            }
+            ssh_write_policy no || warn "policy not applied"
+        else
+            note "answers.txt: password login over SSH stays on."
+            ssh_write_policy yes || warn "policy not applied"
+        fi
+    elif ssh_key_usable; then
         AUTO_DEFAULT=y
         if confirm_yes "Require the key and disable password login over SSH?"; then
             ssh_write_policy no || warn "policy not applied"
@@ -13312,7 +13359,10 @@ stage_lockroot() {
         # disagree about what the policy is. Passwords keep whatever setting
         # they already had -- locking root is not a reason to silently change
         # how the admin user authenticates.
-        if ssh_policy_present && ssh_password_on; then
+        if _sshpw=$(answers_ssh_password); then
+            note "answers.txt decides password login over SSH: $_sshpw"
+            ssh_write_policy "$_sshpw"
+        elif ssh_policy_present && ssh_password_on; then
             ssh_write_policy yes
         elif ssh_policy_present; then
             ssh_write_policy no

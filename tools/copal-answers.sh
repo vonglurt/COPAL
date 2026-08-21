@@ -97,6 +97,7 @@ if [ -f "$ANSWERS" ]; then
     COPAL_TIMEZONE=$(get_answer COPAL_TIMEZONE)
     COPAL_KEYMAP=$(get_answer COPAL_KEYMAP)
     COPAL_ROOT_PW_HASH=$(get_answer COPAL_ROOT_PW_HASH)
+    COPAL_SSH_KEY=$(get_answer COPAL_SSH_KEY)
     COPAL_AUTO=$(get_answer COPAL_AUTO)
 fi
 
@@ -198,11 +199,101 @@ while :; do
     printf '\033[33m  They did not match. Again.\033[0m\n' >&2
 done
 
+# Whether the password just chosen is the default one. Known HERE and nowhere
+# else: the hash is salted, so two builds with 'hunter2' produce different
+# strings and nothing downstream can compare them. The answer is recorded
+# rather than re-derived.
+_is_default_pw=0
+[ "$_pw" = hunter2 ] && _is_default_pw=1
+
 if [ -n "$_pw" ]; then
     COPAL_ROOT_PW_HASH=$(printf '%s\n' "$_pw" | python3 "$CRYPT" --rounds 656000)
     _pw="" _pw2=""
 fi
 [ -n "${COPAL_ROOT_PW_HASH:-}" ] || die "no password hash produced"
+
+# --- the key, and whether passwords are allowed over the network -----------
+#
+# A key is what makes any of this safe, so this does not merely ask whether one
+# exists -- it offers to make one and then uses it. copal-prep.sh already
+# copies the named key onto the card and stage 1 installs it for the login
+# user, so naming it here is the whole of the wiring.
+printf '\n'
+_key=""
+for _k in "$HOME/.ssh/id_ed25519.pub" "$HOME/.ssh/id_ecdsa.pub" "$HOME/.ssh/id_rsa.pub"; do
+    [ -f "$_k" ] && { _key="$_k"; break; }
+done
+[ -n "${COPAL_SSH_KEY:-}" ] && [ -f "${COPAL_SSH_KEY}" ] && _key="$COPAL_SSH_KEY"
+
+if [ -n "$_key" ]; then
+    note "SSH key found: $(awk '{print $1, $NF}' "$_key" 2>/dev/null)"
+    ask "Public key to authorise" "$_key" _key
+else
+    note "No SSH key on this Mac. Without one, reaching the guest over the"
+    note "network means password login -- the thing worth avoiding."
+    printf '  Create an ed25519 key now? [Y/n]: ' >&2
+    IFS= read -r _mk || true
+    case "${_mk:-y}" in
+        [Nn]*) note "No key. Password login stays on; ssh-keygen later closes that." ;;
+        *)
+            # ssh-keygen's own prompts, not reimplemented ones: it asks for a
+            # passphrase and confirms it, and an unencrypted private key must
+            # be the user's explicit choice rather than this script's silent
+            # default. -a 100 is the KDF work factor for the encrypted form.
+            note "ssh-keygen will ask for a passphrase. An empty one means the"
+            note "private key is usable by anything that can read the file."
+            if ssh-keygen -t ed25519 -a 100 -C "copal $(id -un)@$(hostname -s)" \
+                          -f "$HOME/.ssh/id_ed25519"; then
+                _key="$HOME/.ssh/id_ed25519.pub"
+                info "Created $_key"
+            else
+                warn "ssh-keygen did not complete -- continuing without a key"
+                _key=""
+            fi ;;
+    esac
+fi
+
+# Validate what we ended up with rather than trusting the path.
+if [ -n "$_key" ]; then
+    if [ ! -f "$_key" ]; then
+        warn "no such key file: $_key -- continuing without one"; _key=""
+    elif ! grep -qE '^(ssh-(ed25519|rsa)|ecdsa-sha2-|sk-)' "$_key"; then
+        warn "$_key does not look like an OpenSSH PUBLIC key -- ignoring it"
+        note "It should be the .pub half. Never put a private key here."
+        _key=""
+    fi
+fi
+COPAL_SSH_KEY="$_key"
+
+# THE RULE, and the point of this whole section:
+#
+#   default password        -> password login over SSH OFF, always. A password
+#                              written down in the repository is not a
+#                              credential, and leaving it reachable over the
+#                              network is the failure being prevented.
+#   custom password + key   -> OFF as well. The key works and is better.
+#   custom password, no key -> ON, because otherwise there is no way in at all.
+if [ "$_is_default_pw" = 1 ]; then
+    COPAL_SSH_PASSWORD_LOGIN=no
+    note ""
+    note "Default password in use -- SSH password login will be DISABLED."
+    if [ -n "$COPAL_SSH_KEY" ]; then
+        note "Your key is what gets you in over the network."
+    else
+        note "With no key either, SSH will refuse every login. The console"
+        note "still works, and 'doas copal-ssh password on' undoes it there."
+    fi
+elif [ -n "$COPAL_SSH_KEY" ]; then
+    COPAL_SSH_PASSWORD_LOGIN=no
+    note ""
+    note "Key set and a real password chosen -- SSH will accept the key only."
+else
+    COPAL_SSH_PASSWORD_LOGIN=yes
+    note ""
+    note "No key, so SSH password login stays ON for '$COPAL_USER'."
+    note "Run 'ssh-keygen -t ed25519' and re-run 'make answers' to close that."
+fi
+note "Change it by hand in answers.txt if that is not what you want."
 
 # SINGLE quotes, always, and this is not stylistic. A SHA-512 crypt hash
 # begins "$6$rounds=..." -- inside double quotes the shell expands $6 as a
@@ -237,6 +328,12 @@ COPAL_TIMEZONE=$(sq "${COPAL_TIMEZONE}")
 COPAL_KEYMAP=$(sq "${COPAL_KEYMAP}")
 COPAL_ROOT_PW_HASH=$(sq "${COPAL_ROOT_PW_HASH}")
 
+# The .pub half of a key on this Mac. copal-prep.sh copies it to the card as
+# authorized_keys; the private key never leaves this machine.
+COPAL_SSH_KEY=$(sq "${COPAL_SSH_KEY}")
+# yes or no. 'no' means sshd accepts keys only.
+COPAL_SSH_PASSWORD_LOGIN=$(sq "${COPAL_SSH_PASSWORD_LOGIN}")
+
 # 1 = do not stop to ask anything the values above can answer.
 COPAL_AUTO=$(sq "${COPAL_AUTO:-1}")
 EOF
@@ -248,5 +345,7 @@ note "  git identity   ${COPAL_GIT_NAME} <${COPAL_GIT_EMAIL}>"
 note "  user           ${COPAL_USER}"
 note "  hostname       ${COPAL_HOSTNAME}"
 note "  root password  stored as a SHA-512 hash, not recoverable"
+note "  ssh key        ${COPAL_SSH_KEY:-(none)}"
+note "  ssh passwords  $COPAL_SSH_PASSWORD_LOGIN"
 note ""
 note "The next 'make alldebug' builds images that install without stopping."
