@@ -4954,8 +4954,24 @@ done
 # power never reaches any cleanup at the end, so cleaning up on the way in is
 # the only version that actually runs. Five sessions is enough to compare a
 # working boot with a broken one and small enough never to be noticed.
+# OFF BY DEFAULT, and the default is the point: on a working machine this is
+# spending SD-card writes on evidence for a problem nobody has. What stays on
+# unconditionally is ONE log -- the last session -- because a machine that has
+# just failed to start its desktop and kept no record of it is a machine that
+# has to be broken a second time before it can be looked at. One file of a few
+# kilobytes is not a log collection; it is the minimum that makes the FIRST
+# failure diagnosable instead of the second.
+#
+# Debug mode is what turns it into a collection: ten sessions instead of one,
+# Xorg's own log copied in beside each, and /var/log/copal refreshed so all of
+# it is readable over ssh from one directory.
+if [ -f /etc/copal/debug ]; then COPAL_DEBUG="${COPAL_DEBUG:-1}"; fi
+case "${COPAL_DEBUG:-}" in
+    1|yes|on|true) KEEP=10; DEBUG=1 ;;
+    *)             KEEP=2;  DEBUG=0 ;;
+esac
+
 LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/copal"
-KEEP=5
 mkdir -p "$LOGDIR" 2>/dev/null || true
 if [ -d "$LOGDIR" ]; then
     # -t is newest first, so everything past the newest KEEP-1 goes: this run
@@ -4995,11 +5011,17 @@ rc=$?
 # referenced, because it is overwritten by the next attempt -- which is
 # usually the one you make immediately after, destroying the evidence for the
 # failure you are trying to read about.
-for _xl in "$HOME/.local/share/xorg/Xorg.0.log" /var/log/Xorg.0.log; do
-    [ -r "$_xl" ] || continue
-    { echo; echo "--- $_xl ---"; cat "$_xl"; } >> "$LOG" 2>&1
-    break
-done
+if [ "$DEBUG" = 1 ]; then
+    for _xl in "$HOME/.local/share/xorg/Xorg.0.log" /var/log/Xorg.0.log; do
+        [ -r "$_xl" ] || continue
+        { echo; echo "--- $_xl ---"; cat "$_xl"; } >> "$LOG" 2>&1
+        break
+    done
+    # Refresh the one-folder collection while the machine is in the state
+    # being asked about, rather than whenever someone next remembers to.
+    have_dbg=$(command -v copal-debug 2>/dev/null || true)
+    [ -n "$have_dbg" ] && [ -w /var/log ] && copal-debug collect >/dev/null 2>&1 || true
+fi
 
 if [ "$rc" -ne 0 ]; then
     echo >&2
@@ -5009,6 +5031,7 @@ if [ "$rc" -ne 0 ]; then
     tail -n 20 "$LOG" >&2
     echo >&2
     echo "The whole log:  copal-logs x        Every session:  copal-logs list" >&2
+    [ "$DEBUG" = 1 ] || echo "More detail:    doas copal-debug on   then try again" >&2
 fi
 exit "$rc"
 STARTX
@@ -5724,143 +5747,6 @@ COPALHALT
     # about to remove and how much that frees, and the install transcript is
     # never touched by it -- an installer's own record of itself is not
     # garbage, and on a machine being rebuilt it is the only history there is.
-    say "Installing /usr/local/bin/copal-logs"
-    cat > /usr/local/bin/copal-logs <<'COPALLOGS'
-#!/bin/sh
-# SPDX-License-Identifier: MIT
-# Copyright (c) 2026 paulr@sdf.org -- part of Copal Linux.
-# copal-logs -- see the logs, and throw the old ones away.
-set -eu
-
-LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/copal"
-INSTALL_LOG=""
-for _d in /boot /media/*; do
-    [ -f "$_d/copal.log" ] && { INSTALL_LOG="$_d/copal.log"; break; }
-done
-
-have() { command -v "$1" >/dev/null 2>&1; }
-hsize() { du -sh "$@" 2>/dev/null | awk '{print $1}'; }
-
-usage() {
-    cat <<'USAGE'
-copal-logs -- see the logs, and throw the old ones away.
-
-  copal-logs            what exists, and what it costs
-  copal-logs x          the most recent desktop session, in a pager
-  copal-logs x <n>      an older one; n counts back, 1 being the newest
-  copal-logs list       every desktop session log, newest first
-  copal-logs errors     just the (EE) and warning lines from the newest
-  copal-logs install    the install transcript, in a pager
-  copal-logs clean      delete old desktop sessions and stale .bak files
-  copal-logs clean --all  the above, and rotate the install transcript
-
-Desktop sessions are written by copal-startx, five deep, rotated on the way
-in. The install transcript is never deleted by clean without --all.
-USAGE
-}
-
-sessions() { ls -1t "$LOGDIR"/xsession-*.log 2>/dev/null || true; }
-
-nth_session() {  # <n>
-    _n="${1:-1}"
-    sessions | sed -n "${_n}p"
-}
-
-pager() { if have less; then less "$@"; else cat "$@"; fi; }
-
-cmd_status() {
-    printf 'DESKTOP SESSIONS   %s\n' "$LOGDIR"
-    if [ -n "$(sessions)" ]; then
-        sessions | while read -r f; do
-            printf '  %-34s %8s  %s\n' "$(basename "$f")" \
-                   "$(wc -c < "$f" | tr -d ' ')" \
-                   "$(grep -c '(EE)' "$f" 2>/dev/null || echo 0) errors"
-        done
-        printf '  total %s in %s files\n' "$(hsize "$LOGDIR")" "$(sessions | wc -l | tr -d ' ')"
-    else
-        printf '  none yet -- start the desktop once and there will be\n'
-    fi
-
-    printf '\nINSTALL TRANSCRIPT\n'
-    if [ -n "$INSTALL_LOG" ]; then
-        printf '  %-34s %8s\n' "$INSTALL_LOG" "$(wc -c < "$INSTALL_LOG" | tr -d ' ')"
-        printf '  kept: this is the record of what the stages did\n'
-    else
-        printf '  none found\n'
-    fi
-
-    printf '\nSYSTEM LOGS       /var/log\n'
-    printf '  %s' "$(hsize /var/log 2>/dev/null || echo '?')"
-    if [ "$(awk '$2 == "/var/log" { print $3 }' /proc/mounts 2>/dev/null)" = tmpfs ]; then
-        printf '  (in RAM -- lost at reboot unless stage 15 has run)\n'
-    else
-        printf '  (on disk)\n'
-    fi
-    [ -d /var/log.persist ] && printf '  /var/log.persist %s  (copal-logflush)\n' "$(hsize /var/log.persist)"
-
-    printf '\n  copal-logs clean   to free the removable part of that\n'
-}
-
-cmd_clean() {
-    _all="${1:-}"
-    _found=0
-
-    # Desktop sessions beyond the newest five. copal-startx prunes on the way
-    # in, so this is only ever mopping up after a change of KEEP or a machine
-    # that has not started X since.
-    _old=$(sessions | tail -n +6)
-    if [ -n "$_old" ]; then
-        echo "Old desktop sessions:"
-        echo "$_old" | while read -r f; do printf '  %s\n' "$(basename "$f")"; done
-        echo "$_old" | while read -r f; do rm -f "$f"; done
-        _found=1
-    fi
-
-    # .bak files this system makes: inittab, doas, the init script itself.
-    # Only ones with a live original beside them, so nothing orphaned is taken
-    # for a backup and removed.
-    for b in /etc/inittab.bak /boot/copal-init.sh.bak /etc/apk/world.bak; do
-        [ -f "$b" ] || continue
-        [ -f "${b%.bak}" ] || continue
-        printf 'Stale backup: %-32s %s\n' "$b" "$(wc -c < "$b" | tr -d ' ')"
-        rm -f "$b" && _found=1
-    done
-
-    if [ "$_all" = "--all" ] && [ -n "$INSTALL_LOG" ]; then
-        # Rotated, not deleted. One generation back is enough to compare a
-        # reinstall against the install before it, and it stops the transcript
-        # growing without bound on a machine whose stages get re-run often.
-        mv "$INSTALL_LOG" "$INSTALL_LOG.1" 2>/dev/null \
-            && { : > "$INSTALL_LOG"; echo "Rotated $INSTALL_LOG -> .1"; _found=1; }
-    fi
-
-    [ "$_found" = 1 ] || echo "Nothing to clean."
-    sync
-}
-
-case "${1:-}" in
-    ""|status)  cmd_status ;;
-    x|session)  f=$(nth_session "${2:-1}"); [ -n "$f" ] || { echo "no session logs yet" >&2; exit 1; }
-                echo "$f" >&2; pager "$f" ;;
-    list)       if [ -n "$(sessions)" ]; then
-                    sessions | while read -r f; do
-                        printf '  %-34s %s\n' "$(basename "$f")" "$(wc -c < "$f" | tr -d ' ')"
-                    done
-                    printf '\n  in %s\n' "$LOGDIR"
-                else
-                    echo "  none yet"
-                fi ;;
-    errors)     f=$(nth_session 1); [ -n "$f" ] || { echo "no session logs yet" >&2; exit 1; }
-                echo "$f" >&2
-                grep -nE '\(EE\)|\(WW\)|[Ff]atal|error|not found|Permission' "$f" || echo "nothing that looks like an error" ;;
-    install)    [ -n "$INSTALL_LOG" ] || { echo "no install transcript found" >&2; exit 1; }
-                pager "$INSTALL_LOG" ;;
-    clean)      cmd_clean "${2:-}" ;;
-    -h|--help)  usage ;;
-    *)          printf 'copal-logs: unknown argument "%s"\n\n' "$1" >&2; usage >&2; exit 2 ;;
-esac
-COPALLOGS
-    chmod 0755 /usr/local/bin/copal-logs
 
     say "Installing /usr/local/bin/copal-menu"
     cat > /usr/local/bin/copal-menu <<'COPALMENU'
@@ -14192,7 +14078,359 @@ COPALCMD
     chmod 0755 /usr/local/bin/copal
 }
 
+# The log tools, written beside the front door and for the same reason: they
+# are the things you need when a stage has NOT run, so they cannot live inside
+# one. A machine whose desktop will not start is exactly a machine that never
+# finished stage 4, and telling someone to run stage 4 to get the tool that
+# explains why stage 4's desktop will not start is not a plan.
+install_log_tools() {
+    # ----------------------------------------------------------------------
+    # Debug mode, and the one folder to look in.
+    #
+    # THE DEFAULT IS OFF, and that is the important half. A distribution that
+    # logs everything by default on a 512 MB board with an SD card is choosing,
+    # on the user's behalf, to spend write cycles and space on evidence for a
+    # problem they do not have. Most machines never need any of this.
+    #
+    # But when something DOES go wrong, the evidence is scattered across places
+    # that have nothing to do with each other -- a user's XDG state directory, a
+    # FAT partition, /var/log which may or may not be RAM -- and finding them is
+    # a research project at exactly the moment nobody wants one. So debug mode
+    # gathers them into ONE directory and keeps it current.
+    #
+    #   /var/log/copal/     everything, or a symlink to it
+    #
+    # SYMLINKS, NOT COPIES, wherever the original is a live file. A copy is
+    # stale the moment it is made and doubles what the card holds; a symlink
+    # always reads the real thing and costs nothing. Snapshots are used only
+    # where there is no live file to point at -- dmesg is a ring buffer, and
+    # the system's own shape has to be captured at a moment to be compared
+    # against another moment.
+    #
+    # THE SWITCH is a file, /etc/copal/debug, checked at runtime rather than
+    # baked in -- so turning it on needs no reinstall and no stage re-run, and
+    # a machine that is misbehaving right now can start recording immediately.
+    # COPAL_DEBUG in the environment overrides it either way, which is what
+    # makes a single session debuggable without changing the machine.
+    say "Debug logging"
+    cat > /usr/local/bin/copal-debug <<'COPALDEBUG'
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 paulr@sdf.org -- part of Copal Linux.
+# copal-debug -- turn the log collection on, off, or look at it.
+set -eu
+
+FLAG=/etc/copal/debug
+DIR=/var/log/copal
+
+# The one function every other Copal script asks. Environment first, so a
+# single command can be debugged without changing the machine:
+#     COPAL_DEBUG=1 copal-startx
+debug_on() {
+    case "${COPAL_DEBUG:-}" in
+        1|yes|on|true) return 0 ;;
+        0|no|off|false) return 1 ;;
+    esac
+    [ -f "$FLAG" ]
+}
+
+usage() {
+    cat <<'USAGE'
+copal-debug -- the log collection, and the one folder to look in.
+
+  copal-debug            is it on, and what has it gathered
+  copal-debug on         start collecting into /var/log/copal
+  copal-debug off        stop, and leave what is already there
+  copal-debug collect    refresh the snapshots now
+  copal-debug purge      delete the collection entirely
+
+Off by default. On a machine that is working, none of this is worth the
+writes. COPAL_DEBUG=1 in the environment turns it on for one command
+without changing the machine; COPAL_DEBUG=0 turns it off the same way.
+
+Everything lands in one directory so it can be read over ssh:
+    ssh user@thismachine 'ls -l /var/log/copal'
+    ssh user@thismachine 'cat /var/log/copal/sysinfo.txt'
+USAGE
+}
+
+# Snapshots: the things with no live file to point at. Kept small on purpose --
+# this is meant to be read over a slow link, not to be complete.
+collect() {
+    # BEST EFFORT, DELIBERATELY. set -e is right for the rest of this script and
+    # wrong for a diagnostic collector: every probe below is allowed to fail,
+    # because the machines worth running this on are exactly the ones where
+    # some of them will. A missing /proc/bus/input/devices, a grep that matches
+    # nothing, an rc-status on a box that never got OpenRC -- under set -e any
+    # one of those aborts the collection halfway and writes a truncated file
+    # that looks like the machine, rather than like a failed probe. A partial
+    # collection is worse than a noisy one: it is wrong without saying so.
+    set +e
+    mkdir -p "$DIR"
+    {
+        echo "=== collected $(date '+%Y-%m-%d %H:%M:%S') on $(hostname) ==="
+        echo
+        echo "--- kernel and boot ---"
+        uname -a
+        echo "cmdline : $(cat /proc/cmdline)"
+        echo "consoles: $(cat /sys/class/tty/console/active 2>/dev/null)"
+        echo "uptime  : $(uptime)"
+        echo
+        echo "--- filesystems ---"
+        df -h 2>/dev/null | grep -vE '^(tmpfs|devtmpfs) ' || true
+        echo
+        echo "--- graphics and input ---"
+        echo "fb/drm  : $(ls /dev/fb0 /dev/dri/* 2>/dev/null | tr '\n' ' ')"
+        echo "drm mods: $(grep -oE '^(virtio_gpu|drm|drm_kms_helper|simpledrm|bochs)' /proc/modules 2>/dev/null | sort -u | tr '\n' ' ')"
+        sed -n 's/^N: Name=/input   : /p' /proc/bus/input/devices 2>/dev/null
+        echo "Xwrapper: $(sed -n 's/^allowed_users=/allowed_users=/p' /etc/X11/Xwrapper.config 2>/dev/null)"
+        echo
+        echo "--- gettys ---"
+        grep -E 'getty' /etc/inittab 2>/dev/null || true
+        echo
+        echo "--- services ---"
+        rc-status -a 2>/dev/null | grep -E '\[' | tr -s ' ' || true
+        echo
+        echo "--- copal ---"
+        echo "init    : $(wc -l < /boot/copal-init.sh 2>/dev/null | tr -d ' ') lines"
+        cat /etc/copal/version 2>/dev/null || echo "version : never updated by copal -U"
+        ls /etc/copal/ 2>/dev/null | sed 's/^/flags   : /'
+    } > "$DIR/sysinfo.txt" 2>&1
+
+    dmesg > "$DIR/dmesg.log" 2>&1 || true
+
+    # Live files: pointed at, never copied. A copy is stale the moment it is
+    # made, and on this card it is also a second copy of something already
+    # there. Broken links are left in place deliberately -- "xorg.log -> ...
+    # (broken)" is itself the answer to "why is there no desktop".
+    for _pair in \
+        "install.log:/boot/copal.log" \
+        "messages:/var/log/messages" \
+        "xorg.log:/var/log/Xorg.0.log" \
+        "acpid.log:/var/log/acpid.log"
+    do
+        _name="${_pair%%:*}"; _target="${_pair#*:}"
+        ln -sf "$_target" "$DIR/$_name" 2>/dev/null || true
+    done
+
+    # The desktop session belongs to a user, not to the system, so it is found
+    # rather than assumed: whoever's it is, it is the one that matters here.
+    for _h in /home/* /root; do
+        _s="$_h/.local/state/copal/xsession-latest.log"
+        [ -e "$_s" ] || continue
+        ln -sf "$_s" "$DIR/xsession.log" 2>/dev/null || true
+        break
+    done
+
+    cat > "$DIR/README" <<'README'
+This directory is Copal's debug collection. It exists because /etc/copal/debug
+exists; `copal-debug off` stops it being refreshed, `copal-debug purge` removes
+it. Everything here is safe to delete.
+
+  sysinfo.txt   a snapshot of this machine: kernel, consoles, graphics,
+                input devices, gettys, services, and which Copal is installed.
+                Refreshed by `copal-debug collect`.
+  dmesg.log     the kernel ring buffer at collection time.
+  install.log   -> the install transcript on the boot partition
+  xsession.log  -> the most recent desktop session, written by copal-startx
+  xorg.log      -> Xorg's own log, if it got far enough to write one
+  messages      -> the system log
+  acpid.log     -> the power button daemon, if it is running
+
+The arrows are symlinks to the live files, so they are never out of date. A
+BROKEN link is information, not a fault: xorg.log pointing nowhere means X
+never started, which is usually the thing being investigated.
+
+Read it from anywhere:
+    ssh user@thismachine 'cat /var/log/copal/sysinfo.txt'
+    ssh user@thismachine 'tail -40 /var/log/copal/xsession.log'
+README
+
+    # Readable by anyone who can log in: the point is inspection over ssh, and
+    # a debug collection nobody but root can read defeats itself.
+    chmod 0755 "$DIR" 2>/dev/null || true
+    chmod 0644 "$DIR"/sysinfo.txt "$DIR"/dmesg.log "$DIR"/README 2>/dev/null || true
+    set -e
+    return 0
+}
+
+case "${1:-}" in
+    ""|status)
+        if debug_on; then echo "debug logging: ON"; else echo "debug logging: OFF"; fi
+        [ -f "$FLAG" ] && echo "  flag        : $FLAG" || echo "  flag        : not set"
+        [ -n "${COPAL_DEBUG:-}" ] && echo "  COPAL_DEBUG : ${COPAL_DEBUG} (overrides the flag)"
+        if [ -d "$DIR" ]; then
+            echo "  collection  : $DIR ($(du -sh "$DIR" 2>/dev/null | awk '{print $1}'))"
+            ls -l "$DIR" 2>/dev/null | sed 's/^/    /'
+        else
+            echo "  collection  : none yet -- 'copal-debug on' creates it"
+        fi ;;
+    on)
+        [ "$(id -u)" = 0 ] || { echo "needs root: doas copal-debug on" >&2; exit 1; }
+        mkdir -p /etc/copal; : > "$FLAG"
+        collect
+        echo "debug logging ON -- collecting into $DIR"
+        echo "Read it with:  cat $DIR/sysinfo.txt"
+        echo "Turn it off:   doas copal-debug off" ;;
+    off)
+        [ "$(id -u)" = 0 ] || { echo "needs root: doas copal-debug off" >&2; exit 1; }
+        rm -f "$FLAG"
+        echo "debug logging OFF"
+        [ -d "$DIR" ] && echo "$DIR is left as it is -- 'copal-debug purge' removes it" ;;
+    collect)
+        [ "$(id -u)" = 0 ] || { echo "needs root: doas copal-debug collect" >&2; exit 1; }
+        collect; echo "refreshed $DIR" ;;
+    purge)
+        [ "$(id -u)" = 0 ] || { echo "needs root: doas copal-debug purge" >&2; exit 1; }
+        rm -rf "$DIR"; echo "removed $DIR" ;;
+    -h|--help) usage ;;
+    *) printf 'copal-debug: unknown argument "%s"\n\n' "$1" >&2; usage >&2; exit 2 ;;
+esac
+COPALDEBUG
+    chmod 0755 /usr/local/bin/copal-debug
+    note "copal-debug -- off by default; 'doas copal-debug on' gathers /var/log/copal"
+
+    say "Installing /usr/local/bin/copal-logs"
+    cat > /usr/local/bin/copal-logs <<'COPALLOGS'
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 paulr@sdf.org -- part of Copal Linux.
+# copal-logs -- see the logs, and throw the old ones away.
+set -eu
+
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/copal"
+INSTALL_LOG=""
+for _d in /boot /media/*; do
+    [ -f "$_d/copal.log" ] && { INSTALL_LOG="$_d/copal.log"; break; }
+done
+
+have() { command -v "$1" >/dev/null 2>&1; }
+hsize() { du -sh "$@" 2>/dev/null | awk '{print $1}'; }
+
+usage() {
+    cat <<'USAGE'
+copal-logs -- see the logs, and throw the old ones away.
+
+  copal-logs            what exists, and what it costs
+  copal-logs x          the most recent desktop session, in a pager
+  copal-logs x <n>      an older one; n counts back, 1 being the newest
+  copal-logs list       every desktop session log, newest first
+  copal-logs errors     just the (EE) and warning lines from the newest
+  copal-logs install    the install transcript, in a pager
+  copal-logs clean      delete old desktop sessions and stale .bak files
+  copal-logs clean --all  the above, and rotate the install transcript
+
+Desktop sessions are written by copal-startx, five deep, rotated on the way
+in. The install transcript is never deleted by clean without --all.
+USAGE
+}
+
+sessions() { ls -1t "$LOGDIR"/xsession-*.log 2>/dev/null || true; }
+
+nth_session() {  # <n>
+    _n="${1:-1}"
+    sessions | sed -n "${_n}p"
+}
+
+pager() { if have less; then less "$@"; else cat "$@"; fi; }
+
+cmd_status() {
+    printf 'DESKTOP SESSIONS   %s\n' "$LOGDIR"
+    if [ -n "$(sessions)" ]; then
+        sessions | while read -r f; do
+            printf '  %-34s %8s  %s\n' "$(basename "$f")" \
+                   "$(wc -c < "$f" | tr -d ' ')" \
+                   "$(grep -c '(EE)' "$f" 2>/dev/null || echo 0) errors"
+        done
+        printf '  total %s in %s files\n' "$(hsize "$LOGDIR")" "$(sessions | wc -l | tr -d ' ')"
+    else
+        printf '  none yet -- start the desktop once and there will be\n'
+    fi
+
+    printf '\nINSTALL TRANSCRIPT\n'
+    if [ -n "$INSTALL_LOG" ]; then
+        printf '  %-34s %8s\n' "$INSTALL_LOG" "$(wc -c < "$INSTALL_LOG" | tr -d ' ')"
+        printf '  kept: this is the record of what the stages did\n'
+    else
+        printf '  none found\n'
+    fi
+
+    printf '\nSYSTEM LOGS       /var/log\n'
+    printf '  %s' "$(hsize /var/log 2>/dev/null || echo '?')"
+    if [ "$(awk '$2 == "/var/log" { print $3 }' /proc/mounts 2>/dev/null)" = tmpfs ]; then
+        printf '  (in RAM -- lost at reboot unless stage 15 has run)\n'
+    else
+        printf '  (on disk)\n'
+    fi
+    [ -d /var/log.persist ] && printf '  /var/log.persist %s  (copal-logflush)\n' "$(hsize /var/log.persist)"
+
+    printf '\n  copal-logs clean   to free the removable part of that\n'
+}
+
+cmd_clean() {
+    _all="${1:-}"
+    _found=0
+
+    # Desktop sessions beyond the newest five. copal-startx prunes on the way
+    # in, so this is only ever mopping up after a change of KEEP or a machine
+    # that has not started X since.
+    _old=$(sessions | tail -n +6)
+    if [ -n "$_old" ]; then
+        echo "Old desktop sessions:"
+        echo "$_old" | while read -r f; do printf '  %s\n' "$(basename "$f")"; done
+        echo "$_old" | while read -r f; do rm -f "$f"; done
+        _found=1
+    fi
+
+    # .bak files this system makes: inittab, doas, the init script itself.
+    # Only ones with a live original beside them, so nothing orphaned is taken
+    # for a backup and removed.
+    for b in /etc/inittab.bak /boot/copal-init.sh.bak /etc/apk/world.bak; do
+        [ -f "$b" ] || continue
+        [ -f "${b%.bak}" ] || continue
+        printf 'Stale backup: %-32s %s\n' "$b" "$(wc -c < "$b" | tr -d ' ')"
+        rm -f "$b" && _found=1
+    done
+
+    if [ "$_all" = "--all" ] && [ -n "$INSTALL_LOG" ]; then
+        # Rotated, not deleted. One generation back is enough to compare a
+        # reinstall against the install before it, and it stops the transcript
+        # growing without bound on a machine whose stages get re-run often.
+        mv "$INSTALL_LOG" "$INSTALL_LOG.1" 2>/dev/null \
+            && { : > "$INSTALL_LOG"; echo "Rotated $INSTALL_LOG -> .1"; _found=1; }
+    fi
+
+    [ "$_found" = 1 ] || echo "Nothing to clean."
+    sync
+}
+
+case "${1:-}" in
+    ""|status)  cmd_status ;;
+    x|session)  f=$(nth_session "${2:-1}"); [ -n "$f" ] || { echo "no session logs yet" >&2; exit 1; }
+                echo "$f" >&2; pager "$f" ;;
+    list)       if [ -n "$(sessions)" ]; then
+                    sessions | while read -r f; do
+                        printf '  %-34s %s\n' "$(basename "$f")" "$(wc -c < "$f" | tr -d ' ')"
+                    done
+                    printf '\n  in %s\n' "$LOGDIR"
+                else
+                    echo "  none yet"
+                fi ;;
+    errors)     f=$(nth_session 1); [ -n "$f" ] || { echo "no session logs yet" >&2; exit 1; }
+                echo "$f" >&2
+                grep -nE '\(EE\)|\(WW\)|[Ff]atal|error|not found|Permission' "$f" || echo "nothing that looks like an error" ;;
+    install)    [ -n "$INSTALL_LOG" ] || { echo "no install transcript found" >&2; exit 1; }
+                pager "$INSTALL_LOG" ;;
+    clean)      cmd_clean "${2:-}" ;;
+    -h|--help)  usage ;;
+    *)          printf 'copal-logs: unknown argument "%s"\n\n' "$1" >&2; usage >&2; exit 2 ;;
+esac
+COPALLOGS
+    chmod 0755 /usr/local/bin/copal-logs
+}
+
 install_frontdoor
+install_log_tools
 
 while :; do
     state_report
