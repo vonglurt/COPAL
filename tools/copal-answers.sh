@@ -14,10 +14,26 @@
 # can be read by anyone without giving up the password. Stage 1 applies it with
 # `chpasswd -e`, which takes an already-hashed value.
 #
-# The default is 'hunter2', which is a joke, and deliberately so: these VMs are
-# ephemeral and rebuilt constantly, and automated testing needs a password it
-# already knows. Set a real one here for anything that outlives an afternoon --
-# that is the whole point of this being a file you can edit.
+# THE DEFAULT IS 'hunter2', AND IT IS A JOKE PASSWORD ON A REAL MACHINE. It is
+# here because automated testing needs a password it already knows, and that is
+# the only thing it is good for. What is actually being built is not a toy:
+#
+#   - openssh is installed and running from stage 1 (SSHDOPTS="-c openssh")
+#   - the login user shares root's password, and sshd's AllowUsers permits
+#     exactly that account
+#   - root over SSH is always refused, but PASSWORD authentication is left ON
+#     whenever no SSH key was installed -- see stage 13, which keeps it rather
+#     than locking someone off a board they would have to fetch. So on a build
+#     with no key, 'user' plus this password is a working network login
+#   - the guest has its own address on the host network, a full compiler
+#     toolchain, and everything needed to run a server
+#
+# A key from this Mac is installed by default, and stage 13 turns password
+# authentication off when it finds one -- which is the single fact that makes
+# the default defensible at all. Build with CFG_SSHKEY= to skip the key, or
+# put the machine anywhere that matters, and 'hunter2' is exactly as bad as it
+# looks. Set a real one here; that is the whole point of this being a file you
+# can edit.
 #
 # Usage:
 #   tools/copal-answers.sh              ask, then write answers.txt
@@ -144,8 +160,15 @@ if [ -n "${COPAL_ROOT_PW_HASH:-}" ]; then
     note "A password is already on file. Enter alone keeps it; type a new one"
     note "to replace it. There is no way to display the old one."
 else
-    note "Enter alone sets it to 'hunter2' -- a joke, and fine for a VM that is"
-    note "rebuilt every day. Wrong for anything that outlives an afternoon."
+    note "Enter alone sets it to 'hunter2', a joke password. It is here so that"
+    note "automated testing has one it knows -- not because this is a toy."
+    note ""
+    note "This guest runs sshd, shares this password with '$COPAL_USER', has its"
+    note "own address on your network, a full toolchain, and can serve. Root over"
+    note "SSH is always refused and an installed key turns password login off --"
+    note "but a build without a key leaves '$COPAL_USER' plus this password as a"
+    note "working remote login. Type a real one unless you are throwing this"
+    note "machine away today."
 fi
 # What Enter alone does depends on whether a password is already on file, so
 # the prompt says which -- on the line being typed at, not three lines above

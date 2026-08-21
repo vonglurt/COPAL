@@ -357,9 +357,13 @@ layout-auto:
 # install dead.
 #
 # The password is stored as a SHA-512 crypt hash, never in the clear. The
-# default is 'hunter2', which is a joke and meant as one: these VMs are
-# ephemeral, and automated testing wants a password it already knows. Set a
-# real one for anything that outlives an afternoon -- that is what this is for.
+# default is 'hunter2', a joke password kept only so automated testing has one
+# it knows. It is not a toy machine: sshd runs from stage 1, the login user
+# shares root's password, and a build with no SSH key installed leaves that
+# user reachable over the network with it. Root over SSH is always refused,
+# and an installed key -- the default, taken from this Mac -- turns password
+# authentication off, which is what makes 'hunter2' survivable rather than
+# sensible. Set a real one for anything you are not throwing away today.
 answers:
 	@tools/copal-answers.sh
 
