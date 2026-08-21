@@ -4553,6 +4553,33 @@ stage_gui() {
     # font-dejavu, not ttf-dejavu: Alpine renamed the font packages to the
     # font-* prefix and the old name resolves to nothing.
     add_optional i3lock xterm font-terminus font-dejavu xsetroot jgmenu
+    # What every GTK application assumes is already there, and which nothing
+    # in the dependency chain actually installs.
+    #
+    # gtk+3.0 does not depend on an icon theme. Neither does wxwidgets, nor
+    # codeblocks, nor any of the GTK programs in the catalogue -- so a desktop
+    # built from those alone has NO icon theme at all, not even the empty
+    # directory skeleton that icon lookups expect to find. What that produces
+    # is not a missing picture: an icon lookup that fails hands the toolkit an
+    # invalid bitmap, and wxWidgets asserts on it --
+    #
+    #     assert "IsOk()" failed in GetHeight(): invalid bitmap
+    #     assert "IsOk()" failed in DoDrawText(): invalid DC
+    #
+    # -- and its assert handler raises SIGTRAP, so Code::Blocks does not
+    # degrade, it dies on startup.
+    #
+    # hicolor is the skeleton and index every theme inherits from; adwaita is
+    # the one that actually contains icons. gsettings-desktop-schemas is the
+    # other silent assumption -- GTK reads settings out of it and misbehaves
+    # in less obvious ways when it is absent.
+    #
+    # 0.3 MB for the two small ones, and adwaita is 12.6 MB. Worth it: the
+    # alternative is a desktop where GTK and wx applications fail in ways that
+    # look like bugs in the applications.
+    add_optional hicolor-icon-theme gsettings-desktop-schemas
+    add_optional adwaita-icon-theme
+
     # Both remap Caps Lock to Super in .xinitrc -- see the comment there for
     # why that key matters more than it looks. Either one is enough; they are
     # a few kilobytes each and setup-xorg-base does not guarantee them.
