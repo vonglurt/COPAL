@@ -617,7 +617,15 @@ cmd_vm_all() {
         [ -f "$_img" ] || { say "${Y}skip${Z} $_tgt -- no $_img yet"; continue; }
         "$UTMRUN" status --target "$_tgt" >/dev/null 2>&1 \
             || "$UTMRUN" create --target "$_tgt" --image "$_img" || return 1
-        say "${G}ok${Z}   UTM machine for $_tgt"
+        # The shared folder, every time -- not only on create. A machine that
+        # already existed is exactly the one whose share nobody set, and this
+        # is idempotent: UTM records the same path again and nothing changes.
+        # It is done HERE, before anyone boots, because stage 1 detects the
+        # share by attempting the mount, and a folder pointed at afterwards is
+        # a folder that stage 1 did not find.
+        "$UTMRUN" share --target "$_tgt" >/dev/null 2>&1 \
+            && say "${G}ok${Z}   UTM machine for $_tgt ${D}(shared folder set)${Z}" \
+            || say "${G}ok${Z}   UTM machine for $_tgt ${Y}(shared folder NOT set -- utm/utm-vm.sh share --target $_tgt)${Z}"
     done
 }
 

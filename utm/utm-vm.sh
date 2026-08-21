@@ -27,6 +27,7 @@
 #
 # Usage:
 #   utm/utm-vm.sh create  --target aarch64 --image build/copal-vm.img
+#   utm/utm-vm.sh share   --target aarch64 --share ~/Downloads/SharedVM
 #   utm/utm-vm.sh start   --target aarch64
 #   utm/utm-vm.sh status  --target aarch64
 #   utm/utm-vm.sh stop    --target aarch64
@@ -47,6 +48,10 @@ UTM_APP="/Applications/UTM.app"
 UTMCTL="$UTM_APP/Contents/MacOS/utmctl"
 # UTM is sandboxed, so its VMs live in the container rather than ~/Documents.
 UTM_DOCS="$HOME/Library/Containers/com.utmapp.UTM/Data/Documents"
+# Where UTM records what each machine is allowed to reach. Read only to CHECK
+# that a shared folder landed -- never written here, because the bookmark
+# beside the path is UTM's to create.
+UTM_PREFS="$HOME/Library/Containers/com.utmapp.UTM/Data/Library/Preferences/com.utmapp.UTM.plist"
 
 ACTION=""
 TARGET=""
@@ -58,15 +63,18 @@ SSH_PORT=""
 SHARE_DIR="${SHARE_DIR:-$HOME/Downloads/SharedVM}"
 NET_MODE="shared"
 FORCE=0
+# create points the machine at SHARE_DIR by itself. --no-share opts out, for a
+# machine that should reach nothing on this Mac.
+NO_SHARE=0
 
 usage() { sed -n '5,33p' "$0" | sed 's/^# \{0,1\}//'; }
 
 [ $# -gt 0 ] || { usage; exit 0; }
 ACTION="$1"; shift
 case "$ACTION" in
-    create|start|stop|status|delete|refresh|config|ip|log|progress) : ;;
+    create|start|stop|status|delete|refresh|config|ip|log|progress|share) : ;;
     -h|--help) usage; exit 0 ;;
-    *) die "unknown action '$ACTION'. One of: create start stop status delete refresh config ip log progress" ;;
+    *) die "unknown action '$ACTION'. One of: create share start stop status delete refresh config ip log progress" ;;
 esac
 
 while [ $# -gt 0 ]; do
@@ -80,6 +88,7 @@ while [ $# -gt 0 ]; do
         --share)    SHARE_DIR="${2:-}"; shift 2 ;;
         --net)      NET_MODE="${2:-}"; shift 2 ;;
         --force)    FORCE=1; shift ;;
+        --no-share) NO_SHARE=1; shift ;;
         -h|--help)  usage; exit 0 ;;
         *) die "unknown option '$1'. See --help." ;;
     esac
@@ -528,17 +537,12 @@ do_create() {
     printf '    %-16s %s\n' "Display"   "$DISPLAY_HW" >&2
     printf '\n' >&2
     cat >&2 <<NEXT
-  One thing is not scriptable. UTM keeps a shared folder's path in its own
-  registry as a security-scoped bookmark, which only the app can create, so
-  point it at the folder once:
+  The shared folder is already set -- $SHARE_DIR, pointed at
+  by asking UTM to record it rather than by clicking through its settings.
+  Change it later with:  utm/utm-vm.sh share --target $TARGET --share DIR
 
-      UTM -> $NAME -> Edit -> Sharing -> Directory Share Path
-      -> $SHARE_DIR
-
-  Point it there BEFORE running stage 1: stage 1 tries the mount, and keeps
-  it -- /mnt/share, in fstab with nofail, with ~/Shared pointing at it -- only
-  if a folder is actually being shared. Set it later and re-running stage 1
-  picks it up.
+  Stage 1 mounts it at /mnt/share and keeps it there, in fstab with nofail,
+  with ~/Shared and ~/Downloads/SharedVM pointing at it.
 
   Then start it:
 
@@ -618,6 +622,81 @@ register_bundle() {
         sleep 0.5
         _rb=$((_rb + 1))
     done
+    return 1
+}
+
+# ------------------------------------------------------- the shared folder ---
+#
+# THIS USED TO SAY IT COULD NOT BE SCRIPTED, and printed instructions for
+# clicking through UTM's settings instead. Half of that was right: the path is
+# stored as a security-scoped bookmark, and nothing outside UTM's sandbox can
+# mint one -- a bookmark written by this script would be rejected.
+#
+# The conclusion did not follow. UTM is AppleScript-enabled, and its dictionary
+# carries a command for exactly this, with a description that leaves no doubt:
+#
+#     update registry -- "Currently you can only change the shared directory
+#                         with this!"
+#
+# So the work happens INSIDE UTM, which does have the entitlement, and UTM
+# mints the bookmark itself. What could not be scripted was writing the
+# bookmark; asking UTM to write it was available the whole time.
+#
+# VERIFIED BY READING IT BACK, not by trusting the return. The AppleScript
+# answers "ok" as soon as it is queued, and the preference file is written
+# by cfprefsd a moment later -- so a check made immediately after can see the
+# old, empty value. Polling the registry is the only honest confirmation, and
+# it is what tells create whether to keep quiet or print the manual fallback.
+share_registry_path() {  # prints the path UTM has recorded, if any
+    python3 - "$UTM_PREFS" "$NAME" <<'SHAREPY' 2>/dev/null
+import plistlib, sys
+try:
+    d = plistlib.load(open(sys.argv[1], 'rb'))
+except Exception:
+    sys.exit(0)
+for _u, v in d.get('Registry', {}).items():
+    if v.get('Name') != sys.argv[2]:
+        continue
+    for e in v.get('SharedDirectories', []):
+        p = e.get('Path')
+        if p:
+            print(p)
+SHAREPY
+}
+
+do_share() {
+    require_bundle
+    [ -n "$SHARE_DIR" ] || die "--share needs a directory"
+    # A bookmark to a directory that does not exist is a bookmark to nothing,
+    # and the failure surfaces later as a share that silently never mounts.
+    [ -d "$SHARE_DIR" ] || {
+        info "Creating $SHARE_DIR"
+        mkdir -p "$SHARE_DIR" || die "could not create $SHARE_DIR"
+    }
+    # Absolute, because a bookmark is resolved by UTM from its own working
+    # directory, which is not this one.
+    _abs=$(cd "$SHARE_DIR" && pwd) || die "cannot resolve $SHARE_DIR"
+
+    command -v osascript >/dev/null 2>&1 || die "osascript is missing -- cannot talk to UTM"
+    utm_knows || register_bundle || die "UTM does not know about $NAME yet"
+
+    info "Pointing $NAME at $_abs"
+    osascript <<AS >/dev/null 2>&1 || warn "the AppleScript call failed; checking anyway"
+tell application "UTM"
+  update registry (virtual machine named "$NAME") with {POSIX file "$_abs"}
+end tell
+AS
+
+    _sw=0
+    while [ "$_sw" -lt 20 ]; do
+        _got=$(share_registry_path)
+        [ "$_got" = "$_abs" ] && { info "Shared folder set: $_abs"; return 0; }
+        sleep 0.5
+        _sw=$((_sw + 1))
+    done
+    warn "UTM did not record the shared folder."
+    note "Set it by hand: UTM -> $NAME -> Edit -> Sharing -> Directory Share Path"
+    note "  -> $_abs"
     return 1
 }
 
@@ -926,7 +1005,13 @@ REMOTE
 }
 
 case "$ACTION" in
-    create)  do_create  ;;
+    create)  do_create
+             # The folder, straight after the machine, because a share set
+             # after stage 1 has run is a share stage 1 did not find. Failure
+             # is a warning, not a failure of create: the machine is made and
+             # usable, and do_share has already said how to set it by hand.
+             [ "$NO_SHARE" -eq 1 ] || do_share || true ;;
+    share)   do_share   ;;
     start)   do_start   ;;
     stop)    do_stop    ;;
     status)  do_status  ;;
