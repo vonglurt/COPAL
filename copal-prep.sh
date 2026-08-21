@@ -5548,7 +5548,8 @@ have tcpdump  && out "Network capture,$TERM_EMU -e sh -c 'tcpdump -i eth0 -nn'" 
 have bluetoothctl && out "Bluetooth,$TERM_EMU -e bluetoothctl" || true
 have iw && out "Wifi scan,$TERM_EMU -e sh -c 'iw dev wlan0 scan | grep SSID; read x'" || true
 have alsamixer && out "Volume,$TERM_EMU -e alsamixer" || true
-out "Setup and stages,$TERM_EMU -e sh -c 'sh /boot/copal-init.sh'"
+out "Setup and stages,$TERM_EMU -e sh -c 'copal; echo; echo Press Enter to close; read x'"
+out "Update Copal,$TERM_EMU -e sh -c 'copal -U; echo; echo Press Enter to close; read x'"
 out "Key bindings,$TERM_EMU -e less $HOME/.config/i3/keys.txt"
 
 # ----- Session -----
@@ -6508,6 +6509,16 @@ COPALSPLASH
        the only thing that genuinely takes Cmd+W away from UTM.
      On the Mac, to get the confirmation dialog back:
        defaults write com.utmapp.UTM NoQuitConfirmation -bool false
+
+ KEEPING IT UP TO DATE
+   copal                 the stage menu -- the same one the installer used
+   copal --check         is there a newer Copal?  changes nothing
+   copal -U              update to it. Fetches one file, checks it parses,
+                         keeps the old copy as copal-init.sh.bak. It changes
+                         what the stages WILL do -- re-run the ones you care
+                         about afterwards, stage 1 being the cheap one.
+   copal -U v1.2         or any branch, tag or commit -- how you pin a
+                         version, or go back to one that worked.
 
  FILES
    ~/.config/i3/config          bindings and colours
@@ -13446,6 +13457,9 @@ case "${1:-}" in
     --help|-h)
         echo "usage: copal [--auto]"
         echo "  --auto   run every stage unattended, resuming across reboots"
+        echo
+        echo "The 'copal' command itself has more: -U to update from the"
+        echo "repository, --check, --version. Run: copal --help"
         exit 0 ;;
 esac
 
@@ -13483,6 +13497,213 @@ MSG
     fi
     note "Manual it is. The menu is below; stages can be run in any order."
 fi
+
+# ---------------------------------------------------------- the front door ---
+#
+# --help above has said "usage: copal [--auto]" for a long time, and there has
+# never been a `copal` to type. This writes one, on every run, so it exists
+# from the first invocation and can never drift out of step with the script it
+# fronts -- it IS this script's front door, not a copy of it.
+#
+# WHY A RAW FETCH AND NOT A GIT CHECKOUT.
+#
+# The instinct is to clone the repository and `git pull`, and it is the wrong
+# shape for this machine. What updating Copal means, on the target, is exactly
+# one file: /boot/copal-init.sh. Every stage, every guide, every helper script
+# and the whole catalogue live inside it as heredocs -- there is nothing else
+# on the card that comes from the repository. So:
+#
+#   - git is not installed, and pulling it plus its dependencies onto a 512 MB
+#     board costs more than the thing being updated. curl is already here.
+#   - a checkout carries history, docs, the Makefile and the Mac-side scripts,
+#     none of which this machine can use. copal-prep.sh alone is the payload.
+#   - nothing here ever commits, so a working tree is not a working tree, it is
+#     a directory that can develop local modifications and start refusing to
+#     fast-forward -- on the machine least able to debug that.
+#   - the one thing git would genuinely give you is the ability to pin to a tag
+#     or roll back to a known commit, and `copal -U <ref>` buys that for free:
+#     raw.githubusercontent.com serves any branch, tag or full SHA.
+#
+# What is fetched is copal-prep.sh, which is the GENERATOR -- copal-init.sh is
+# the heredoc inside it. So the update extracts the same way the Makefile does
+# on the Mac, checks the result parses, and only then replaces the installed
+# copy. A truncated download or an HTML error page cannot survive `sh -n`.
+#
+# There is no signature check. The transport is TLS to raw.githubusercontent.com
+# and that is the whole of the trust model; say so plainly rather than implying
+# more. Anyone who wants better can point COPAL_REPO at their own fork.
+install_frontdoor() {
+    [ -d /usr/local/bin ] || mkdir -p /usr/local/bin 2>/dev/null || return 0
+    cat > /usr/local/bin/copal <<'COPALCMD'
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 paulr@sdf.org -- part of Copal Linux.
+# copal -- the front door on the machine itself.
+#
+# Rewritten by copal-init.sh every time it runs, so editing this file is
+# pointless; edit copal-prep.sh instead.
+set -eu
+
+REPO="${COPAL_REPO:-vonglurt/copal}"
+VERFILE=/etc/copal/version
+
+have() { command -v "$1" >/dev/null 2>&1; }
+die()  { printf 'copal: %s\n' "$*" >&2; exit 1; }
+
+# The same marker copal-init.sh itself uses: answers.txt is written to the boot
+# partition on every platform, and copal-init.sh sits beside it. Nothing is
+# named by device, because the same card is mmcblk0p1 on a Pi and sda1 on a PC.
+find_init() {
+    for _d in /boot /media/*; do
+        [ -f "$_d/copal-init.sh" ] && [ -f "$_d/answers.txt" ] && { echo "$_d/copal-init.sh"; return 0; }
+    done
+    return 1
+}
+
+usage() {
+    cat <<'USAGE'
+copal -- Copal Alpine Linux, on the machine itself.
+
+  copal                 the stage menu
+  copal --auto          every stage, unattended, resuming across reboots
+  copal -U [ref]        update from the repository (default branch: main).
+                        'ref' may be any branch, tag or commit SHA, which is
+                        how you pin a version or go back to an older one.
+  copal --check [ref]   say whether an update is available; change nothing
+  copal --version       what is installed, and where it came from
+  copal --help          this
+
+Updating fetches copal-prep.sh over HTTPS and extracts copal-init.sh from it --
+one file, because every stage, guide and helper on this machine lives inside
+it. The old copy is kept as copal-init.sh.bak. Updating changes what the
+stages WILL do; it does not re-run anything. Re-run the stages you care about
+afterwards.
+USAGE
+}
+
+# Fetch and extract, into $2. Prints the temporary source path on success.
+fetch_init() {  # <ref> <destination>
+    _ref="$1"; _dest="$2"
+    have curl || die "curl is not installed -- apk add curl"
+    _url="https://raw.githubusercontent.com/$REPO/$_ref/copal-prep.sh"
+    _src=$(mktemp /tmp/copal-prep.XXXXXX) || die "cannot write to /tmp"
+    printf 'Fetching %s\n' "$_url" >&2
+    curl -fsSL --retry 3 -o "$_src" "$_url" || {
+        rm -f "$_src"
+        die "download failed -- no network, or no such ref '$_ref' in $REPO"
+    }
+
+    # Three checks, cheapest first. A 404 page, a captive-portal login page and
+    # a half-finished download all reach this point looking like a file.
+    _sz=$(wc -c < "$_src" | tr -d ' ')
+    [ "$_sz" -gt 100000 ] || { rm -f "$_src"; die "downloaded $_sz bytes -- that is not copal-prep.sh"; }
+    head -1 "$_src" | grep -q '^#!/bin/bash' || { rm -f "$_src"; die "downloaded file is not a shell script"; }
+
+    # The same extraction the Makefile does on the Mac: the heredoc, minus its
+    # own opening and closing lines.
+    sed -n '/^cat > .*copal-init\.sh" <<.COPALINIT.$/,/^COPALINIT$/p' "$_src" \
+        | sed '1d;$d' > "$_dest"
+    [ -s "$_dest" ] || { rm -f "$_src"; die "no copal-init.sh inside that copal-prep.sh"; }
+
+    # The check that makes this safe to do unattended: a corrupt or truncated
+    # extraction cannot parse, and an unparseable init script is a machine with
+    # no way to run any stage at all.
+    sh -n "$_dest" || { rm -f "$_src"; die "the extracted copal-init.sh does not parse -- refusing to install it"; }
+
+    echo "$_src"
+}
+
+sha() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+
+cmd_update() {  # <ref> <check-only 0|1>
+    _ref="${1:-main}"; _checkonly="${2:-0}"
+    _cur=$(find_init) || die "cannot find copal-init.sh -- is the boot partition mounted?"
+
+    _new=$(mktemp /tmp/copal-init.XXXXXX) || die "cannot write to /tmp"
+    _src=$(fetch_init "$_ref" "$_new")
+
+    if [ "$(sha "$_new")" = "$(sha "$_cur")" ]; then
+        rm -f "$_new" "$_src"
+        printf 'Already current: %s is identical to %s@%s\n' "$_cur" "$REPO" "$_ref"
+        return 0
+    fi
+
+    # busybox wc does not pad, GNU/BSD wc does; strip it either way.
+    _oldl=$(wc -l < "$_cur" | tr -d ' '); _newl=$(wc -l < "$_new" | tr -d ' ')
+    printf 'Update available: %s lines installed, %s lines at %s@%s\n' \
+           "$_oldl" "$_newl" "$REPO" "$_ref"
+
+    if [ "$_checkonly" = 1 ]; then
+        rm -f "$_new" "$_src"
+        printf 'Nothing changed. Run "copal -U %s" to install it.\n' "$_ref"
+        return 0
+    fi
+
+    # The boot partition is FAT and may be mounted read-only, or not at all
+    # writable by the time anyone thinks to update. Put it back as it was.
+    _mnt=$(dirname "$_cur")
+    _remounted=0
+    if ! touch "$_cur" 2>/dev/null; then
+        mount -o remount,rw "$_mnt" 2>/dev/null || die "$_mnt is read-only and would not remount"
+        _remounted=1
+    fi
+
+    cp "$_cur" "$_cur.bak" || die "could not back up $_cur"
+    if cat "$_new" > "$_cur"; then
+        chmod 0755 "$_cur" 2>/dev/null || true
+        sync
+        printf 'Installed %s   (previous copy kept as %s.bak)\n' "$_cur" "$_cur"
+    else
+        cat "$_cur.bak" > "$_cur" 2>/dev/null || true
+        die "write failed -- restored the previous copy"
+    fi
+
+    mkdir -p /etc/copal 2>/dev/null || true
+    { printf 'repo=%s\nref=%s\nsha256=%s\nupdated=%s\n' \
+             "$REPO" "$_ref" "$(sha "$_cur")" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+    } > "$VERFILE" 2>/dev/null || true
+
+    [ "$_remounted" = 1 ] && mount -o remount,ro "$_mnt" 2>/dev/null || true
+    rm -f "$_new" "$_src"
+
+    cat <<'AFTER'
+
+Updated. Nothing has been re-run: an update changes what the stages will do,
+not what is already installed. To pick the changes up, re-run the stages they
+touch -- "copal" for the menu. Stage 1 is the cheap one to re-run and repairs
+the admin account, doas and the shell files; stage 4 rewrites the desktop, its
+key bindings and the helper programs.
+AFTER
+}
+
+cmd_version() {
+    _cur=$(find_init) || die "cannot find copal-init.sh"
+    printf 'copal-init.sh  %s\n' "$_cur"
+    printf 'lines          %s\n' "$(wc -l < "$_cur" | tr -d ' ')"
+    printf 'sha256         %s\n' "$(sha "$_cur")"
+    if [ -f "$VERFILE" ]; then
+        printf '\nlast updated by "copal -U":\n'
+        sed 's/^/  /' "$VERFILE"
+    else
+        printf '\nNever updated by "copal -U" -- this is the copy the card was\n'
+        printf 'written with. "copal --check" says whether a newer one exists.\n'
+    fi
+}
+
+case "${1:-}" in
+    -U|--update)  shift; cmd_update "${1:-main}" 0 ;;
+    --check)      shift; cmd_update "${1:-main}" 1 ;;
+    --version|-V) cmd_version ;;
+    --help|-h)    usage ;;
+    -a|--auto)    _i=$(find_init) || die "cannot find copal-init.sh"; exec sh "$_i" --auto ;;
+    "")           _i=$(find_init) || die "cannot find copal-init.sh"; exec sh "$_i" ;;
+    *)            printf 'copal: unknown option "%s"\n\n' "$1" >&2; usage >&2; exit 2 ;;
+esac
+COPALCMD
+    chmod 0755 /usr/local/bin/copal
+}
+
+install_frontdoor
 
 while :; do
     state_report
