@@ -2642,6 +2642,32 @@ state_report() {
 # Before this split, sixteen bare 'add_optional' calls would abort their stage
 # if every name in the list happened to be missing -- silently, hours into an
 # unattended install.
+# Where each package's install time is recorded. On the root filesystem rather
+# than in /var/log/copal, because this is not debug output -- it is a property
+# of the build worth keeping on every machine, and it has to survive debug mode
+# being off, which it is by default.
+INSTALL_TIMES=/var/lib/copal/install-times.tsv
+
+# One line per package: when, how long, whether it worked, and how big it was.
+#
+# TAB-SEPARATED AND APPEND-ONLY, so it can be read by sort/awk on a machine
+# with nothing else installed, and so a stage that dies half-way leaves the
+# packages it did finish rather than a truncated summary of all of them.
+#
+# WHAT THE NUMBER ACTUALLY MEANS, because it is easy to misread and the whole
+# point is to act on it: apk resolves dependencies, so the FIRST package to
+# need a dependency pays for it. Ask for cmake after gcc and cmake looks cheap;
+# ask for it first and it wears the entire toolchain. That is not noise to be
+# corrected -- it is the real cost of putting that package first, and it is
+# exactly the thing worth reordering. The report says so rather than pretending
+# each figure is intrinsic.
+record_install_time() {  # <package> <seconds> <ok|failed|cached>
+    mkdir -p "$(dirname "$INSTALL_TIMES")" 2>/dev/null || return 0
+    _sz=$(apk info -s "${1%@*}" 2>/dev/null | awk '/[0-9]/ { print $1; exit }')
+    printf '%s\t%s\t%s\t%s\t%s\n' \
+        "$(date +%s)" "$2" "$3" "$1" "${_sz:-?}" >> "$INSTALL_TIMES" 2>/dev/null || true
+}
+
 try_add() {
     _ok=0
     for _p in "$@"; do
@@ -2660,8 +2686,10 @@ try_add() {
         # 'apk info -e' does not understand the suffix, so the
         # already-installed check has to be made against the bare name.
         _bare=${_p%@*}
+        _t0=$(date +%s)
         if apk info -e "$_bare" >/dev/null 2>&1; then
             note "$_bare (already installed)"; _ok=1
+            record_install_time "$_bare" 0 cached
         # apk's own complaint, kept rather than thrown away. This used to
         # report every failure as "not in the configured repositories", which
         # is one cause out of many and was flatly wrong the day the network
@@ -2671,8 +2699,15 @@ try_add() {
         # other side of a 2>/dev/null. An unattended install is read from its
         # log afterwards or not at all, so the log has to say what happened.
         elif _why=$(apk add "$_p" 2>&1 >/dev/null); then
-            note "$_p"; _ok=1
+            _el=$(( $(date +%s) - _t0 ))
+            # Only the slow ones are worth remarking on inline; the rest are in
+            # the report. Thirty seconds is where a human starts wondering
+            # whether it has hung.
+            [ "$_el" -ge 30 ] && note "$_p  (${_el}s)" || note "$_p"
+            _ok=1
+            record_install_time "$_p" "$_el" ok
         else
+            record_install_time "$_p" "$(( $(date +%s) - _t0 ))" failed
             # apk spreads one error over three lines; make it one.
             _why=$(printf '%s' "$_why" | tr '\n\t' '  ' | sed 's/  */ /g; s/^ //; s/ $//')
             # Order matters. A package apk cannot fetch an index for is
@@ -14637,6 +14672,134 @@ esac
 COPALDEBUG
     chmod 0755 /usr/local/bin/copal-debug
     note "copal-debug -- off by default; 'doas copal-debug on' gathers /var/log/copal"
+
+    # ----------------------------------------------------------------------
+    # copal-times.
+    #
+    # An install that takes hours gives no account of itself. You know it was
+    # slow; you do not know WHICH of three hundred packages was slow, and that
+    # is the only fact that could shorten it next time. try_add records a line
+    # per package as it goes, and this is what reads it back.
+    #
+    # The point is deciding what to drop or move, so the report is sorted by
+    # cost and says what fraction of the whole each one was. A package that is
+    # 40% of stage 12 is a decision waiting to be made; a package that is 0.2%
+    # is not, however annoying it felt at the time.
+    say "Installing /usr/local/bin/copal-times"
+    cat > /usr/local/bin/copal-times <<'COPALTIMES'
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 paulr@sdf.org -- part of Copal Linux.
+# copal-times -- how long each package took, and which ones are worth moving.
+set -eu
+
+TIMES=/var/lib/copal/install-times.tsv
+MOTD=/etc/motd
+
+usage() {
+    cat <<'USAGE'
+copal-times -- how long each package took to install.
+
+  copal-times             the slowest packages, and what they cost
+  copal-times all         every package, slowest first
+  copal-times total       one line: packages, failures, wall-clock
+  copal-times --motd      regenerate the login summary (needs root)
+  copal-times --reset     start the record again (needs root)
+
+WHAT THE NUMBERS MEAN. apk resolves dependencies, so the FIRST package to
+need a dependency pays for it. Ask for cmake after gcc and cmake looks cheap;
+ask for it first and it wears the whole toolchain. That is not an error in the
+measurement -- it is the real cost of that ordering, and it is the thing worth
+changing. A package near the top is either genuinely large or is the one that
+happened to drag in a toolchain.
+USAGE
+}
+
+[ -s "$TIMES" ] || { echo "No install times recorded yet ($TIMES)." >&2; exit 1; }
+
+# Fields: epoch, seconds, result, package, installed-size
+tot()    { awk -F'\t' '{ s += $2 } END { printf "%d", s+0 }' "$TIMES"; }
+count()  { awk -F'\t' 'END { print NR }' "$TIMES"; }
+failed() { awk -F'\t' '$3 == "failed" { n++ } END { print n+0 }' "$TIMES"; }
+cached() { awk -F'\t' '$3 == "cached" { n++ } END { print n+0 }' "$TIMES"; }
+
+hms() {  # <seconds> -> 1h 23m 45s, skipping the leading zeroes
+    _s=${1:-0}
+    if   [ "$_s" -ge 3600 ]; then printf '%dh %dm %ds' $((_s/3600)) $((_s%3600/60)) $((_s%60))
+    elif [ "$_s" -ge 60 ];   then printf '%dm %ds' $((_s/60)) $((_s%60))
+    else                          printf '%ds' "$_s"
+    fi
+}
+
+report() {  # <how many rows, or "all">
+    _lim="${1:-15}"
+    _total=$(tot)
+    [ "$_total" -gt 0 ] || _total=1
+    printf '\n  %-24s %8s %7s  %s\n' PACKAGE TIME SHARE SIZE
+    printf '  %s\n' '----------------------------------------------------------------'
+    # Slowest first. Cached and failed rows are dropped: neither cost anything
+    # to install, and both would push real packages off a short list.
+    awk -F'\t' '$3 == "ok" && $2 > 0 { print }' "$TIMES" \
+        | sort -t"$(printf '\t')" -k2 -rn \
+        | { [ "$_lim" = all ] && cat || head -n "$_lim"; } \
+        | while IFS="$(printf '\t')" read -r _when _sec _res _pkg _size; do
+              printf '  %-24s %7ss %6s%%  %s\n' \
+                     "$_pkg" "$_sec" \
+                     "$(awk -v a="$_sec" -v b="$_total" 'BEGIN { printf "%.1f", a*100/b }')" \
+                     "$_size"
+          done
+    printf '\n'
+}
+
+summary() {
+    printf '  %s packages, %s already present, %s failed. Install time: %s.\n' \
+           "$(count)" "$(cached)" "$(failed)" "$(hms "$(tot)")"
+}
+
+case "${1:-}" in
+    ''|top)   report 15; summary
+              printf '\n  copal-times all   every package     copal-times --motd   at login\n\n' ;;
+    all)      report all; summary ;;
+    total)    summary ;;
+    --motd)
+        [ "$(id -u)" = 0 ] || { echo "needs root: doas copal-times --motd" >&2; exit 1; }
+        # Short, because a MOTD nobody reads is worse than none. The five
+        # slowest and the total: enough to know whether the last build was
+        # normal, and where to look if it was not.
+        {
+            printf '\n  Copal -- last install: %s\n' "$(hms "$(tot)")"
+            printf '  Slowest packages:\n'
+            awk -F'\t' '$3 == "ok" && $2 > 0 { print }' "$TIMES" \
+                | sort -t"$(printf '\t')" -k2 -rn | head -5 \
+                | while IFS="$(printf '\t')" read -r _w _sec _r _pkg _sz; do
+                      printf '    %-22s %ss\n' "$_pkg" "$_sec"
+                  done
+            printf '  Full report: copal-times     Clear this: doas copal-times --reset\n\n'
+        } > "$MOTD"
+        echo "wrote $MOTD" ;;
+    --reset)
+        [ "$(id -u)" = 0 ] || { echo "needs root: doas copal-times --reset" >&2; exit 1; }
+        : > "$TIMES"; : > "$MOTD"; echo "install times cleared" ;;
+    -h|--help) usage ;;
+    *) printf 'copal-times: unknown argument "%s"\n\n' "$1" >&2; usage >&2; exit 2 ;;
+esac
+COPALTIMES
+    chmod 0755 /usr/local/bin/copal-times
+
+    # The login summary, regenerated at every boot rather than written once by
+    # whichever stage happened to finish last. A stage run tomorrow adds to the
+    # record, and a MOTD that still described last week's build would be worse
+    # than no MOTD at all.
+    mkdir -p /etc/local.d
+    cat > /etc/local.d/copal-times.start <<'TIMESBOOT'
+#!/bin/sh
+# Written by copal-init.sh. Refresh the login summary of install times.
+[ -s /var/lib/copal/install-times.tsv ] || exit 0
+/usr/local/bin/copal-times --motd >/dev/null 2>&1 || true
+TIMESBOOT
+    chmod 0755 /etc/local.d/copal-times.start
+    rc-update add local default >/dev/null 2>&1 || true
+    note "copal-times -- per-package install times; summary in the MOTD at login"
 
     say "Installing /usr/local/bin/copal-logs"
     cat > /usr/local/bin/copal-logs <<'COPALLOGS'
