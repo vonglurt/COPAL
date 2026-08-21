@@ -2257,6 +2257,51 @@ root_fstype()  { awk '$2 == "/" { fs = $3 } END { print fs }' /proc/mounts; }
 # whether anything you install survives the next reboot.
 is_diskless() { [ "$(root_fstype)" = tmpfs ]; }
 
+# Is this machine virtual? Used to keep guest-only software off real hardware.
+#
+# WHY THIS EXISTS WHEN THE CALLERS ALREADY GUARD THEMSELVES. Every VM-only
+# feature here is detected by the thing it needs -- the clipboard agent looks
+# for /dev/virtio-ports/com.redhat.spice.0, the shared folder tries the 9p
+# mount. That is the better test in every case, because it asks the question
+# that matters ("is a channel being offered?") rather than one that merely
+# correlates with it ("is this a VM?"), and it cannot drift out of step with
+# reality the way a list of hypervisor names does.
+#
+# This is the second, cheaper answer, for the two things capability detection
+# cannot do: state plainly in a debug report what kind of machine this is, and
+# let a caller refuse on hardware WITHOUT first having to probe for a device.
+# Callers should still prefer their own probe and use this to say no early.
+#
+# THE PI CHECK COMES FIRST AND IS FINAL. A Raspberry Pi names itself in the
+# device tree, and nothing about a Pi should ever be mistaken for a guest --
+# so that answer is returned before any of the positive tests can be fooled by
+# a virtio driver loaded for some other reason.
+is_vm() {
+    # A Pi is never a VM, whatever else is on the bus.
+    if grep -qi "raspberry pi" /proc/device-tree/model 2>/dev/null; then
+        return 1
+    fi
+    # QEMU's aarch64 'virt' machine has no DMI and no useful cpuinfo flag; it
+    # names itself here instead, and this is the only signal it gives.
+    if grep -qai "dummy-virt\|qemu" /proc/device-tree/model 2>/dev/null; then
+        return 0
+    fi
+    # x86: the firmware says who made the "board".
+    case "$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null)" in
+        QEMU|*Bochs*|*VirtualBox*|*VMware*|*Xen*|*Parallels*|*"Apple Virtualization"*) return 0 ;;
+    esac
+    # x86 again: the CPU admits it is being virtualised.
+    grep -qw hypervisor /proc/cpuinfo 2>/dev/null && return 0
+    [ -e /sys/hypervisor/type ] && return 0
+    # Last resort: a virtio bus with devices on it. Weakest of the tests --
+    # virtio can appear on real hardware in odd setups -- so it is last, and
+    # only reached when nothing above has answered.
+    for _d in /sys/bus/virtio/devices/*; do
+        [ -e "$_d" ] && return 0
+    done
+    return 1
+}
+
 # The admin user's home, and giving them what root just created on their
 # behalf. copal-init.sh runs as root throughout, so without own_by_user every
 # dotfile, disk image and launcher lands root-owned in a directory the admin
@@ -5329,7 +5374,14 @@ stage_gui() {
     #
     # It brings dynamic resolution with it, which on a VM window that gets
     # dragged around is worth as much as the clipboard.
-    if [ -e /dev/virtio-ports/com.redhat.spice.0 ]; then
+    if ! is_vm; then
+        # Belt and braces. The port test below is already impossible to pass on
+        # a Pi -- virtio ports come from a device a hypervisor creates, and
+        # there is no hypervisor -- but a guest-only package refusing to
+        # install on hardware should say so for a reason anyone can check,
+        # rather than by silently failing a test whose meaning is not obvious.
+        note "real hardware -- no clipboard agent (that is a guest-only thing)"
+    elif [ -e /dev/virtio-ports/com.redhat.spice.0 ]; then
         say "This machine is offered a clipboard channel -- installing the agent"
         if add_optional spice-vdagent; then
             rc-update add spice-vdagentd default >/dev/null 2>&1 || true
@@ -14270,6 +14322,32 @@ set -eu
 FLAG=/etc/copal/debug
 DIR=/var/log/copal
 
+# What kind of machine this is, in one line, for the report -- and it says WHY
+# it thinks so. "virtual (DMI vendor: QEMU)" is checkable; "virtual" is a claim
+# you have to take on trust, which is the wrong thing to put in a diagnostic.
+#
+# Self-contained rather than sharing copal-init.sh's is_vm(), because this
+# script is installed beside the front door and has to work on a machine where
+# no stage has run.
+is_vm_report() {
+    _m=$(tr -d '\000' < /proc/device-tree/model 2>/dev/null)
+    case "$_m" in
+        *[Rr]aspberry*[Pp]i*) echo "real hardware ($_m)"; return ;;
+        *dummy-virt*)         echo "virtual (device tree: $_m)"; return ;;
+    esac
+    _v=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null)
+    case "$_v" in
+        QEMU|*Bochs*|*VirtualBox*|*VMware*|*Xen*|*Parallels*|*Virtualization*)
+            echo "virtual (DMI vendor: $_v)"; return ;;
+    esac
+    grep -qw hypervisor /proc/cpuinfo 2>/dev/null && { echo "virtual (cpuinfo hypervisor flag)"; return; }
+    [ -e /sys/hypervisor/type ] && { echo "virtual ($(cat /sys/hypervisor/type 2>/dev/null))"; return; }
+    for _d in /sys/bus/virtio/devices/*; do
+        [ -e "$_d" ] && { echo "probably virtual (virtio devices present)"; return; }
+    done
+    echo "real hardware${_m:+ -- $_m}${_v:+ -- $_v}"
+}
+
 # The one function every other Copal script asks. Environment first, so a
 # single command can be debugged without changing the machine:
 #     COPAL_DEBUG=1 copal-startx
@@ -14355,6 +14433,8 @@ collect() {
         echo
         echo "--- filesystems ---"
         df -h 2>/dev/null | grep -vE '^(tmpfs|devtmpfs) ' || true
+        echo
+        echo "machine : $(is_vm_report)"
         echo
         echo "--- graphics and input ---"
         echo "fb/drm  : $(ls /dev/fb0 /dev/dri/* 2>/dev/null | tr '\n' ' ')"
