@@ -299,7 +299,7 @@ labrador lachlan ladoga lanao laptev ligurian limpopo loire lomond lualaba
 lucerne
 mackenzie magdalena maggiore malawi manitoba maracaibo marmara mediterranean
 mekong michigan missouri murray
-nakuru naryn nasser natron neagh negro nelson neuchatel niger nipigon nyasa
+nakuru naryn nasser natron neagh nelson neuchatel nipigon nyasa
 ohrid okanagan okavango okeechobee okhotsk onega ontario orange orinoco
 ottawa ouachita
 pacific pamlico paraguay parana patos pechora peipus pontchartrain potomac
@@ -4102,13 +4102,32 @@ configure_9p_share() {
         note "/etc/fstab -- /mnt/share, nofail so a host with no share still boots"
     fi
 
-    # Somewhere obvious. pcmanfm and the file manager open on $HOME, and a
-    # mount point three directories away might as well not exist.
+    # Somewhere obvious, twice over. pcmanfm and the file manager open on
+    # $HOME, and a mount point three directories away might as well not exist.
+    #
+    # ~/Downloads/SharedVM is the second one and it is not redundant: that is
+    # where the folder lives ON THE MAC, so the same path means the same files
+    # on both sides of the machine boundary. Muscle memory and half-remembered
+    # paths carry across, and anything written down -- a note, a script, a
+    # command in the transcript above -- stays true whichever side runs it.
+    # ~/Shared stays as the short one worth typing.
     _uh=$(user_home)
-    if [ -n "$_uh" ] && [ -d "$_uh" ] && [ ! -e "$_uh/Shared" ]; then
-        ln -s /mnt/share "$_uh/Shared" 2>/dev/null \
-            && { chown -h "$(id -u "$PI_USER" 2>/dev/null || echo 0)" "$_uh/Shared" 2>/dev/null || true
-                 note "$_uh/Shared -> /mnt/share"; }
+    _uid=$(id -u "$PI_USER" 2>/dev/null || echo 0)
+    if [ -n "$_uh" ] && [ -d "$_uh" ]; then
+        mkdir -p "$_uh/Downloads" 2>/dev/null || true
+        for _link in "$_uh/Shared" "$_uh/Downloads/SharedVM"; do
+            # Both tests, and -L first. -e follows the link, so a symlink whose
+            # target is not mounted yet reads as ABSENT and a plain -e check
+            # would happily stack a second link on top of it every re-run. -L
+            # is the one that asks "is there a link here at all".
+            if [ -L "$_link" ] || [ -e "$_link" ]; then
+                continue
+            fi
+            ln -s /mnt/share "$_link" 2>/dev/null || continue
+            chown -h "$_uid" "$_link" 2>/dev/null || true
+            note "$_link -> /mnt/share"
+        done
+        chown "$_uid" "$_uh/Downloads" 2>/dev/null || true
     fi
 
     cat <<'SHAREMSG'
@@ -4916,7 +4935,82 @@ for g in video input tty; do
     echo "warning: $(id -un) is not in the '$g' group -- X may fail to start." >&2
     echo "         Fix with:  doas adduser $(id -un) $g   then log out and in." >&2
 done
-exec startx "$@"
+
+# ---------------------------------------------------------------- logging ---
+#
+# WHY THIS EXISTS. When X fails to start, everything explaining why goes to the
+# terminal you typed startx in -- and that terminal is usually the one X just
+# took the screen away from and gave back a second later, or a console that has
+# already scrolled. So the single most useful piece of evidence about a desktop
+# that will not start is the thing least likely to still be on screen. Xorg's
+# own log does not cover it either: the interesting failures happen BEFORE Xorg
+# gets far enough to open one, and those leave no file at all.
+#
+# So the session is recorded. Not to a system-wide place -- this is one user's
+# desktop, not a service -- but to XDG_STATE_HOME, which is precisely the
+# directory the spec sets aside for logs a program keeps between runs.
+#
+# ROTATION IS DONE FIRST, not last. A session that ends by the machine losing
+# power never reaches any cleanup at the end, so cleaning up on the way in is
+# the only version that actually runs. Five sessions is enough to compare a
+# working boot with a broken one and small enough never to be noticed.
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/copal"
+KEEP=5
+mkdir -p "$LOGDIR" 2>/dev/null || true
+if [ -d "$LOGDIR" ]; then
+    # -t is newest first, so everything past the newest KEEP-1 goes: this run
+    # is about to add one back.
+    ls -1t "$LOGDIR"/xsession-*.log 2>/dev/null | tail -n +"$KEEP" | while read -r _old; do
+        rm -f "$_old"
+    done
+    LOG="$LOGDIR/xsession-$(date +%Y%m%d-%H%M%S).log"
+    ln -sf "$LOG" "$LOGDIR/xsession-latest.log" 2>/dev/null || true
+else
+    LOG=/dev/null
+fi
+
+# The header is the half of the evidence that is never in the error message.
+# Which tty this was typed on is the thing that decides whether Xorg's wrapper
+# will even permit the attempt, and it is invisible afterwards.
+{
+    echo "=== copal-startx $(date '+%Y-%m-%d %H:%M:%S') ==="
+    echo "user      : $(id -un) ($(id -u))   groups: $(id -Gn)"
+    echo "tty       : $(tty 2>&1)"
+    echo "consoles  : $(cat /sys/class/tty/console/active 2>/dev/null)"
+    echo "DISPLAY   : ${DISPLAY:-unset}"
+    echo "fb / drm  : $(ls /dev/fb0 /dev/dri/card0 2>/dev/null | tr '\n' ' ')"
+    echo "Xwrapper  : $(sed -n 's/^allowed_users=/allowed_users=/p' /etc/X11/Xwrapper.config 2>/dev/null)"
+    echo "--- startx output follows ---"
+} > "$LOG" 2>&1
+
+# NOT piped through tee. startx works out which VT to take from its controlling
+# terminal, and putting a pipe in the way of a program that is about to take
+# over the screen is a good way to acquire a second, subtler bug. Redirecting
+# is enough: on success nobody reads this anyway, because X has the display,
+# and on failure the tail is printed below while the message is still wanted.
+startx "$@" >> "$LOG" 2>&1
+rc=$?
+
+# Xorg's own log, if it got far enough to write one. Copied rather than
+# referenced, because it is overwritten by the next attempt -- which is
+# usually the one you make immediately after, destroying the evidence for the
+# failure you are trying to read about.
+for _xl in "$HOME/.local/share/xorg/Xorg.0.log" /var/log/Xorg.0.log; do
+    [ -r "$_xl" ] || continue
+    { echo; echo "--- $_xl ---"; cat "$_xl"; } >> "$LOG" 2>&1
+    break
+done
+
+if [ "$rc" -ne 0 ]; then
+    echo >&2
+    echo "The desktop exited with status $rc." >&2
+    echo "Recorded in: $LOG" >&2
+    echo >&2
+    tail -n 20 "$LOG" >&2
+    echo >&2
+    echo "The whole log:  copal-logs x        Every session:  copal-logs list" >&2
+fi
+exit "$rc"
 STARTX
     chmod 0755 /usr/local/bin/copal-startx
     note "copal-startx -- refuses to start the desktop as root, and says why"
@@ -5606,6 +5700,168 @@ do_halt
 COPALHALT
     chmod 0755 /usr/local/bin/copal-halt
 
+    # ----------------------------------------------------------------------
+    # copal-logs.
+    #
+    # Logs on this machine come from three places that have nothing to do with
+    # each other, live in three directories, and are cleaned up by three
+    # different mechanisms -- or by none. That is how a 512 MB board with an SD
+    # card ends up with a full /var and no obvious culprit.
+    #
+    #   ~/.local/state/copal/   desktop sessions, written by copal-startx.
+    #                           Rotated by copal-startx itself, five deep.
+    #   /boot/copal.log         the install transcript. Small, precious, and
+    #                           the one thing here worth keeping: it is the
+    #                           record of what every stage actually did.
+    #   /var/log/               the system's own, on tmpfs unless stage 15 has
+    #                           been run, in which case copal-logflush copies
+    #                           it down to the card hourly.
+    #
+    # This is one command that can see all three, so "what is using space" and
+    # "throw away what I do not need" stop being a research project.
+    #
+    # NOTHING IS DELETED WITHOUT BEING NAMED FIRST. clean prints what it is
+    # about to remove and how much that frees, and the install transcript is
+    # never touched by it -- an installer's own record of itself is not
+    # garbage, and on a machine being rebuilt it is the only history there is.
+    say "Installing /usr/local/bin/copal-logs"
+    cat > /usr/local/bin/copal-logs <<'COPALLOGS'
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 paulr@sdf.org -- part of Copal Linux.
+# copal-logs -- see the logs, and throw the old ones away.
+set -eu
+
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/copal"
+INSTALL_LOG=""
+for _d in /boot /media/*; do
+    [ -f "$_d/copal.log" ] && { INSTALL_LOG="$_d/copal.log"; break; }
+done
+
+have() { command -v "$1" >/dev/null 2>&1; }
+hsize() { du -sh "$@" 2>/dev/null | awk '{print $1}'; }
+
+usage() {
+    cat <<'USAGE'
+copal-logs -- see the logs, and throw the old ones away.
+
+  copal-logs            what exists, and what it costs
+  copal-logs x          the most recent desktop session, in a pager
+  copal-logs x <n>      an older one; n counts back, 1 being the newest
+  copal-logs list       every desktop session log, newest first
+  copal-logs errors     just the (EE) and warning lines from the newest
+  copal-logs install    the install transcript, in a pager
+  copal-logs clean      delete old desktop sessions and stale .bak files
+  copal-logs clean --all  the above, and rotate the install transcript
+
+Desktop sessions are written by copal-startx, five deep, rotated on the way
+in. The install transcript is never deleted by clean without --all.
+USAGE
+}
+
+sessions() { ls -1t "$LOGDIR"/xsession-*.log 2>/dev/null || true; }
+
+nth_session() {  # <n>
+    _n="${1:-1}"
+    sessions | sed -n "${_n}p"
+}
+
+pager() { if have less; then less "$@"; else cat "$@"; fi; }
+
+cmd_status() {
+    printf 'DESKTOP SESSIONS   %s\n' "$LOGDIR"
+    if [ -n "$(sessions)" ]; then
+        sessions | while read -r f; do
+            printf '  %-34s %8s  %s\n' "$(basename "$f")" \
+                   "$(wc -c < "$f" | tr -d ' ')" \
+                   "$(grep -c '(EE)' "$f" 2>/dev/null || echo 0) errors"
+        done
+        printf '  total %s in %s files\n' "$(hsize "$LOGDIR")" "$(sessions | wc -l | tr -d ' ')"
+    else
+        printf '  none yet -- start the desktop once and there will be\n'
+    fi
+
+    printf '\nINSTALL TRANSCRIPT\n'
+    if [ -n "$INSTALL_LOG" ]; then
+        printf '  %-34s %8s\n' "$INSTALL_LOG" "$(wc -c < "$INSTALL_LOG" | tr -d ' ')"
+        printf '  kept: this is the record of what the stages did\n'
+    else
+        printf '  none found\n'
+    fi
+
+    printf '\nSYSTEM LOGS       /var/log\n'
+    printf '  %s' "$(hsize /var/log 2>/dev/null || echo '?')"
+    if [ "$(awk '$2 == "/var/log" { print $3 }' /proc/mounts 2>/dev/null)" = tmpfs ]; then
+        printf '  (in RAM -- lost at reboot unless stage 15 has run)\n'
+    else
+        printf '  (on disk)\n'
+    fi
+    [ -d /var/log.persist ] && printf '  /var/log.persist %s  (copal-logflush)\n' "$(hsize /var/log.persist)"
+
+    printf '\n  copal-logs clean   to free the removable part of that\n'
+}
+
+cmd_clean() {
+    _all="${1:-}"
+    _found=0
+
+    # Desktop sessions beyond the newest five. copal-startx prunes on the way
+    # in, so this is only ever mopping up after a change of KEEP or a machine
+    # that has not started X since.
+    _old=$(sessions | tail -n +6)
+    if [ -n "$_old" ]; then
+        echo "Old desktop sessions:"
+        echo "$_old" | while read -r f; do printf '  %s\n' "$(basename "$f")"; done
+        echo "$_old" | while read -r f; do rm -f "$f"; done
+        _found=1
+    fi
+
+    # .bak files this system makes: inittab, doas, the init script itself.
+    # Only ones with a live original beside them, so nothing orphaned is taken
+    # for a backup and removed.
+    for b in /etc/inittab.bak /boot/copal-init.sh.bak /etc/apk/world.bak; do
+        [ -f "$b" ] || continue
+        [ -f "${b%.bak}" ] || continue
+        printf 'Stale backup: %-32s %s\n' "$b" "$(wc -c < "$b" | tr -d ' ')"
+        rm -f "$b" && _found=1
+    done
+
+    if [ "$_all" = "--all" ] && [ -n "$INSTALL_LOG" ]; then
+        # Rotated, not deleted. One generation back is enough to compare a
+        # reinstall against the install before it, and it stops the transcript
+        # growing without bound on a machine whose stages get re-run often.
+        mv "$INSTALL_LOG" "$INSTALL_LOG.1" 2>/dev/null \
+            && { : > "$INSTALL_LOG"; echo "Rotated $INSTALL_LOG -> .1"; _found=1; }
+    fi
+
+    [ "$_found" = 1 ] || echo "Nothing to clean."
+    sync
+}
+
+case "${1:-}" in
+    ""|status)  cmd_status ;;
+    x|session)  f=$(nth_session "${2:-1}"); [ -n "$f" ] || { echo "no session logs yet" >&2; exit 1; }
+                echo "$f" >&2; pager "$f" ;;
+    list)       if [ -n "$(sessions)" ]; then
+                    sessions | while read -r f; do
+                        printf '  %-34s %s\n' "$(basename "$f")" "$(wc -c < "$f" | tr -d ' ')"
+                    done
+                    printf '\n  in %s\n' "$LOGDIR"
+                else
+                    echo "  none yet"
+                fi ;;
+    errors)     f=$(nth_session 1); [ -n "$f" ] || { echo "no session logs yet" >&2; exit 1; }
+                echo "$f" >&2
+                grep -nE '\(EE\)|\(WW\)|[Ff]atal|error|not found|Permission' "$f" || echo "nothing that looks like an error" ;;
+    install)    [ -n "$INSTALL_LOG" ] || { echo "no install transcript found" >&2; exit 1; }
+                pager "$INSTALL_LOG" ;;
+    clean)      cmd_clean "${2:-}" ;;
+    -h|--help)  usage ;;
+    *)          printf 'copal-logs: unknown argument "%s"\n\n' "$1" >&2; usage >&2; exit 2 ;;
+esac
+COPALLOGS
+    chmod 0755 /usr/local/bin/copal-logs
+
     say "Installing /usr/local/bin/copal-menu"
     cat > /usr/local/bin/copal-menu <<'COPALMENU'
 #!/bin/sh
@@ -5780,6 +6036,7 @@ have tcpdump  && out "Network capture,$TERM_EMU -e sh -c 'tcpdump -i eth0 -nn'" 
 have bluetoothctl && out "Bluetooth,$TERM_EMU -e bluetoothctl" || true
 have iw && out "Wifi scan,$TERM_EMU -e sh -c 'iw dev wlan0 scan | grep SSID; read x'" || true
 have alsamixer && out "Volume,$TERM_EMU -e alsamixer" || true
+out "Logs,$TERM_EMU -e sh -c 'copal-logs; echo; echo Press Enter to close; read x'"
 out "Setup and stages,$TERM_EMU -e sh -c 'copal; echo; echo Press Enter to close; read x'"
 out "Update Copal,$TERM_EMU -e sh -c 'copal -U; echo; echo Press Enter to close; read x'"
 out "Key bindings,$TERM_EMU -e less $HOME/.config/i3/keys.txt"
