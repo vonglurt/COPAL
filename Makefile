@@ -66,7 +66,7 @@ export MEM CPUS BUILDDIR CACHEDIR
 model_of = $(patsubst pizero%,zero%,$(1))
 
 .DEFAULT_GOAL := help
-.PHONY: alldebug build-all-debug imagedebug freshdebug \
+.PHONY: alldebug build-all-debug imagedebug freshdebug purge \
 	help menu flow targets boards configure require-tools vm graphical check \
         fresh auto image refresh utm utm-x86 lint space clean distclean \
         all cache build-all
@@ -123,6 +123,8 @@ help:
 	@printf '\033[1m  Housekeeping\033[0m\n'
 	@printf '  make lint       sh -n on copal-prep.sh and on the copal-init.sh it generates\n'
 	@printf '  make space      what is taking up room and which target removes it. Removes nothing\n'
+	@printf '  make purge      everything: images, payloads, logs AND the UTM machines\n'
+	@printf '                  \033[2mAsks first. Their virtual disks go too -- make purge YES=1 to skip the prompt\033[0m\n'
 	@printf '  make clean      the images, EFI stores, logs, and the generated config that\n'
 	@printf '                  carries the git identity, username and SSH key. Reports what it freed\n'
 	@printf '  make distclean  clean, and the verified Alpine payloads in %s as well\n' '$(CACHEDIR)/'
@@ -366,6 +368,9 @@ all:
 # `doas copal-debug off` turns it off early; `copal-debug bundle` packs it up.
 DEBUG ?= 1d
 
+# Set to 1 to skip purge's confirmation prompt.
+YES ?=
+
 alldebug:
 	@./copal all --debug=$(DEBUG)
 
@@ -564,6 +569,55 @@ clean:
 # collapses this recipe onto one line, and a bare case pattern's unbalanced ')'
 # inside $( ) is a syntax error in bash. The leading paren is POSIX and it
 # balances.
+# purge -- start from nothing, VMs included.
+#
+# distclean stops at this checkout: it removes images, payloads and
+# transcripts, and leaves the registered UTM machines alone, because a machine
+# inside another application's sandbox container is not this repository's to
+# delete as a side effect. purge is the target that says delete them anyway --
+# named, asked for, and confirmed.
+#
+# The virtual disks go with them. That is the whole point and it is why this
+# asks: a VM here is a thing you rebuild in an hour from an image you also
+# rebuild, so nothing in one is precious -- but "nothing in one is precious"
+# is a judgement about THIS project, not a property of virtual machines, and
+# a target that quietly destroyed them would be wrong on any other.
+#
+# ONLY THE MACHINES THIS REPOSITORY MAKES, BY EXACT NAME. PURGE_VMS is the
+# whole list, and utm-vm.sh resolves each --target to one bundle whose name is
+# spelled out here -- so a machine you built by hand, or named anything else,
+# or that merely has "Copal" somewhere in its title, is not matched and is not
+# touched. Nothing here globs, searches, or deletes by pattern: a target that
+# removes virtual machines has no business guessing which ones.
+#
+# YES=1 skips the prompt, for a script that has already decided.
+PURGE_VMS = aarch64:Copal-aarch64 x86_64:Copal-x86_64
+purge:
+	@printf '\033[1mThis removes, permanently:\033[0m\n'
+	@printf '  %s/ -- every image, payload, transcript and harvested log\n' '$(BUILDDIR)'
+	@for _p in $(PURGE_VMS); do \
+	    _t=$${_p%%:*}; _n=$${_p#*:}; \
+	    $(UTMRUN) status --target $$_t >/dev/null 2>&1 \
+	        && printf '  UTM machine %s -- and its virtual disk\n' "$$_n"; \
+	done; true
+	@printf '  \033[2mOnly those exact names. Any other UTM machine is left alone.\033[0m\n' 
+	@printf '\n  \033[2mThe images take about an hour to rebuild; the payloads re-download.\033[0m\n'
+	@printf '  \033[2mAnything only on a VM disk is gone for good.\033[0m\n\n'
+	@if [ "$(YES)" != 1 ]; then \
+	    printf '\033[33mType yes to delete all of it: \033[0m'; \
+	    read _r < /dev/tty || _r=''; \
+	    [ "$$_r" = yes ] || { printf '\033[36m==>\033[0m Aborted -- nothing removed.\n'; exit 1; }; \
+	fi; \
+	for _p in $(PURGE_VMS); do \
+	    _t=$${_p%%:*}; _n=$${_p#*:}; \
+	    $(UTMRUN) status --target $$_t >/dev/null 2>&1 || continue; \
+	    $(UTMRUN) stop --target $$_t >/dev/null 2>&1 || true; \
+	    $(UTMRUN) delete --target $$_t --name "$$_n" --force || \
+	        printf '\033[33mwarning:\033[0m could not delete %s\n' "$$_n"; \
+	done; \
+	$(MAKE) --no-print-directory distclean
+	@printf '\033[36m==>\033[0m \033[1mPurged.\033[0m Rebuild with: make alldebug\n'
+
 distclean:
 	@$(MAKE) --no-print-directory clean CLEAN_HINT=0
 	@_f=$$(ls -d $(BUILDDIR) 2>/dev/null; \
