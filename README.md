@@ -46,7 +46,7 @@ flowchart TD
         C["<b>3 · Log in as root</b> — no password yet<br/>run copal-init.sh · stages 1, 2, 3"]
         D(("stage 3<br/>reboots"))
         E["<b>3 · Log in as root, again</b><br/>stages 4 to 13 — installing is root's job"]
-        F["<b>4 · Log in as your own account</b><br/>type <code>startx</code>"]
+        F["<b>4 · Log in as your own account</b><br/>type <code>startx</code> —<br/>or let stage 4 do it for you at boot"]
         G(["a tiling desktop, running as you —<br/>not as root"])
         C --> D --> E --> F --> G
     end
@@ -82,6 +82,11 @@ an identical black screen. Stage 4 sets all three. If you type `startx` while
 still root, `copal-startx` stops you and says why — a warning, not a lock, since
 recovering a broken desktop from a root login is sometimes exactly the thing to
 do.
+
+Stage 4 also asks whether the desktop should start **by itself** at boot. Say
+yes and `tty1` logs your account in and runs `startx`; the serial console keeps
+its ordinary login prompt either way, so the answer never costs you a way in.
+Deleting `/etc/copal/autostart-desktop` puts the console back at the next boot.
 
 The rest of this file expands those four steps: **[From zero to a running
 system](#from-zero-to-a-running-system)** is the step-by-step version, with the
@@ -150,12 +155,24 @@ Full automatic answers every question except these:
    own account. **Type the same thing all three times.**
 
 Then walk away. It takes hours. It reboots itself once, part-way through stage
-3, and resumes on its own without being asked.
+3, and resumes on its own without being asked; stage 4's "start the desktop at
+boot?" question is answered **yes** for you, and it reboots a second and last
+time when everything is done.
 
 ### 4 · When it has finished
 
-Log in as the username chosen when the image was written — `user` unless you
-said otherwise — and start the desktop:
+It prints a summary, the per-stage timings, and then offers to reboot — ten
+seconds, and **Ctrl-C** stays where you are. The reboot is not decoration: the
+install replaced the kernel, moved the root filesystem, added zram and locked
+the root account, and none of that is fully in effect until PID 1 starts again.
+
+The machine comes back at the graphical console with the desktop already
+running, logged in as the username chosen when the image was written — `user`
+unless you said otherwise. On the serial console you get a login prompt as
+before, which is how you reach a machine whose desktop did not come up.
+
+To do it by hand instead — after declining the autostart question, or on a
+machine reached over the serial line:
 
 ```sh
 startx
@@ -163,6 +180,15 @@ startx
 
 Root installs the system; your own account runs it. Typing `startx` while still
 root is stopped on purpose, with an explanation rather than a lock.
+
+Turning the automatic desktop off later takes one file:
+
+```sh
+doas rm /etc/copal/autostart-desktop
+```
+
+The autologin on `tty1` stays; only the `startx` goes. `/etc/inittab.bak` is
+the copy from before stage 4 touched it, if you want the login prompt back too.
 
 ### Stopping, resuming, and what it costs
 
@@ -784,7 +810,8 @@ Then the menu itself:
     3) Full root filesystem    move / onto p2 with setup-disk -m sys
                                (needed for a desktop; writes to the card)
     4) Graphical desktop       X.Org on the framebuffer, i3, terminal, file
-                               manager, task manager   (needs 3 done first)
+                               manager, task manager. Asks whether to start
+                               the desktop at boot   (needs 3 done first)
     5) Compressed RAM swap     zram -- the biggest win available on 512 MB
     6) Authorise the SSH key   the Mac's public key for 'user'
     7) Development environment gcc/make/gdb, nvim configured for building and
@@ -799,7 +826,8 @@ Then the menu itself:
    11) Snapshots               rsync snapshots on a third partition, and
                                Timeshift if you want it (edge/testing only)
     a) Full automatic install  every stage, unattended, resuming across the
-                               reboot. Only stops for the root password
+                               reboot. Only stops for the root password,
+                               and reboots again when it is done
    12) Applications           316 small programs -- browser, mail, audio,
                                editors, viewers, games, gopher/gemini, disc
                                tools. What the menu installs from too
@@ -877,7 +905,8 @@ progress checklist can never disagree:
 
 Stage 3's reboot is survived by a marker file on the boot partition plus a
 resume block in the new root's `/root/.profile`, so logging back in as root
-picks the install up where it stopped. It stops exactly once, in the first
+picks the install up where it stopped. The run ends with a second reboot, asked
+for with a ten-second window to refuse it. It stops exactly once, in the first
 minute, for two things `setup-alpine` has no answer-file variable for: the
 **root password** and the **git identity** (offered from this Mac's config, so
 Enter accepts). After that you can walk away. It takes hours.
@@ -1019,6 +1048,12 @@ The order to try things in, cheapest first:
 8. **A rebuild that means something starts from nothing.** An interrupted
    install leaves a resume marker, so `make vm` on a half-finished image boots
    into the middle of stage 1. `make fresh` deletes the image and starts again.
+9. **The desktop starts by itself and you want the console.** Stage 4's
+   autostart gives you five seconds and a **Ctrl-C** at the `tty1` prompt, and
+   the serial console is never touched — so there is always a way back in. To
+   stop it for good, `doas rm /etc/copal/autostart-desktop`. If X fails while
+   autostart is on you land at a shell on `tty1` rather than a black screen:
+   the block runs `startx` and lets it fail, and `/var/log/Xorg.0.log` says why.
 
 
 ### Cleaning up — disk space, and the files that carry your name

@@ -4530,6 +4530,100 @@ STARTX
     note "copal-startx -- refuses to start the desktop as root, and says why"
 }
 
+# Starting the desktop by hand is right for a machine you are still building
+# and wrong for one you have finished: a Pi wired to a monitor with no keyboard
+# nearby should come up in i3, not at a login prompt nobody is going to answer.
+# So this is asked rather than assumed -- and it is asked HERE, in stage 4,
+# because stage 4 is the stage that produced a desktop to start.
+#
+# Two pieces, and both are needed:
+#
+#  1. Autologin on tty1. busybox getty has no --autologin of its own; what it
+#     has is -n (do not prompt for a name) and -l (run this instead of
+#     /bin/login). Pointing -l at a one-line script that execs `login -f
+#     $PI_USER` is the standard way to spell autologin on Alpine, and it works
+#     whether or not util-linux's agetty is installed. Only tty1 is touched:
+#     the serial console keeps its ordinary login prompt, which is what you
+#     want on the VM models and on a Pi you reach over a UART.
+#
+#  2. A block in ~/.profile that runs startx. It is guarded four ways, because
+#     a .profile that starts X at the wrong moment is a machine you cannot log
+#     in to: only on tty1, only with no DISPLAY already set, only when the
+#     switch file is there, and never while a full-automatic install is still
+#     resuming -- that hook is in the same .profile and its stages need the
+#     console, not an X session sitting on top of them.
+#
+# /etc/copal/autostart-desktop is the switch. Deleting it is enough to get the
+# console back at the next boot, without editing inittab or .profile, and the
+# autologin is left in place because it is the half nobody regrets.
+configure_desktop_autostart() {
+    confirm_yes "Start the desktop automatically at boot (autologin as '$PI_USER', then startx)?" || {
+        note "Desktop autostart declined -- log in and run startx"
+        rm -f /etc/copal/autostart-desktop 2>/dev/null || true
+        return 0
+    }
+
+    mkdir -p /etc/copal
+    : > /etc/copal/autostart-desktop
+    note "/etc/copal/autostart-desktop -- delete this file to get the console back"
+
+    cat > /usr/local/bin/copal-autologin <<AUTOLOGIN
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 paulr@sdf.org -- part of Copal Linux.
+# copal-autologin -- what getty runs on tty1 instead of /bin/login.
+#
+# Written by copal-init.sh. -f means "this account is already authenticated",
+# which is the whole trick; getty was started with -n so no name was asked for.
+exec /bin/login -f $PI_USER
+AUTOLOGIN
+    chmod 0755 /usr/local/bin/copal-autologin
+
+    # Rewrite the tty1 line in place rather than appending a second one: two
+    # respawn entries for the same terminal is two gettys fighting over it.
+    if [ -f /etc/inittab ]; then
+        cp /etc/inittab /etc/inittab.bak
+        if grep -q '^tty1::respawn:' /etc/inittab; then
+            sed -i 's|^tty1::respawn:.*|tty1::respawn:/sbin/getty -n -l /usr/local/bin/copal-autologin 38400 tty1|' /etc/inittab
+        else
+            printf 'tty1::respawn:/sbin/getty -n -l /usr/local/bin/copal-autologin 38400 tty1\n' >> /etc/inittab
+        fi
+        note "/etc/inittab -- tty1 logs '$PI_USER' in automatically (.bak kept)"
+    else
+        warn "no /etc/inittab -- autologin not configured, startx block still installed"
+    fi
+
+    # Into the admin user's .profile only. Root's is deliberately left alone:
+    # the account that must never own the desktop is not the one to start it.
+    _uh=$(user_home)
+    if [ -n "$_uh" ] && [ -d "$_uh" ]; then
+        if grep -q 'copal autostart' "$_uh/.profile" 2>/dev/null; then
+            note "$_uh/.profile already starts the desktop"
+        else
+            cat >> "$_uh/.profile" <<'AUTOSTART'
+# >>> copal autostart >>>
+# Start the desktop on the physical console. Remove /etc/copal/autostart-desktop
+# to stop this without editing anything.
+if [ -f /etc/copal/autostart-desktop ] \
+   && [ -z "${DISPLAY:-}" ] \
+   && [ "$(tty 2>/dev/null)" = /dev/tty1 ] \
+   && [ ! -f /boot/copal-auto ] \
+   && ! ls /media/*/copal-auto >/dev/null 2>&1; then
+    printf '\n  Copal: starting the desktop in 5 seconds.\n'
+    printf '  Press Ctrl-C now for a shell instead.\n\n'
+    if sleep 5; then exec startx; fi
+fi
+# <<< copal autostart <<<
+AUTOSTART
+            _uid=$(id -u "$PI_USER" 2>/dev/null || echo "")
+            [ -n "$_uid" ] && chown "$_uid" "$_uh/.profile" 2>/dev/null || true
+            note "$_uh/.profile -- startx on tty1, with five seconds to stop it"
+        fi
+    else
+        warn "no home directory for '$PI_USER' -- the startx block was not installed"
+    fi
+}
+
 stage_gui() {
     say "Stage 4: X.Org and a window manager"
 
@@ -6421,6 +6515,7 @@ XRES
 
     install_modern_browser
     configure_x_for_user
+    configure_desktop_autostart
 
     say "Stage 4 complete."
     cat <<MSG
@@ -6429,6 +6524,10 @@ XRES
         exit                     leave this root shell
         login as $PI_USER        at the console
         startx
+
+    If you said yes to starting the desktop at boot, none of that is needed
+    after the next reboot -- tty1 logs '$PI_USER' in and startx runs. Delete
+    /etc/copal/autostart-desktop to get the console back.
 
     If you are still root when you type startx, copal-startx will stop you and
     say so. That is the check, not a bug.
@@ -12846,6 +12945,13 @@ auto_run() {
       - Stage 3 reboots the machine. It comes back on its own: log in as
         EITHER root or the admin user -- both resume the install after a
         ten-second pause -- with that one password.
+      - Stage 4 asks whether the desktop should start by itself at boot.
+        Unattended, the answer is yes: tty1 logs the admin user in and runs
+        startx. Deleting /etc/copal/autostart-desktop undoes it.
+
+    It ends by rebooting -- the install changes the kernel, the root
+    filesystem and the login path, and a reboot is the only honest way to see
+    what you actually built. You get ten seconds to stop it.
 
     It finishes by locking the root account (stage 13), so from then on you
     log in as the admin user and use `doas` for anything privileged. That
@@ -12958,6 +13064,37 @@ MSG
     Re-run it from the menu -- every stage is safe to run again.
 
 MSG
+    auto_reboot
+}
+
+# The last thing a full-automatic install does.
+#
+# Not decoration: stages 3 and 8 changed the partition table and the root
+# filesystem, stage 5 added zram, stage 13 locked root, and stage 4 may have
+# just made tty1 log the admin user in and start X. None of that is fully in
+# effect until PID 1 is started again, and a machine left running in the
+# half-old state is where "it worked during the install and not afterwards"
+# comes from.
+#
+# Ten seconds, and Ctrl-C is enough: the alternative -- rebooting silently the
+# moment the last stage returns -- takes the console away from someone who is
+# sitting there reading the summary that was printed one line earlier.
+#
+# 'sync' first, because the summary and the log were written seconds ago and
+# lbu-committed state is not the same thing as flushed state.
+auto_reboot() {
+    confirm_yes "Reboot now to start the machine you just built?" || {
+        note "Not rebooting. Do it yourself before trusting what is installed."
+        return 0
+    }
+    sync
+    printf '\n  Rebooting in 10 seconds. Press Ctrl-C to stay here.\n\n'
+    if sleep 10; then
+        say "REBOOTING"
+        reboot
+    else
+        note "Reboot cancelled."
+    fi
 }
 
 # ------------------------------------------------------------------- menu ---
